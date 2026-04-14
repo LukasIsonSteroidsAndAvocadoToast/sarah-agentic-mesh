@@ -236,6 +236,33 @@ model Swarm_Agent {
   interactions Int     @default(0)
 }
 
+enum MeshDraftStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PUBLISHED
+}
+
+model MeshContentDraft {
+  @@map("mesh_content_draft")
+  @@unique([contentItemId, platform, workflowId])
+  @@index([contentItemId, createdAt])
+  @@index([platform, status])
+
+  id              String          @id @default(uuid())
+  contentItemId   String          @map("content_item_id")
+  contentItem     MeshContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  workflowId      String?         @map("workflow_id")
+  platform        String
+  draftText       String          @map("draft_text") @db.Text
+  dnaConfidence   Float?          @map("dna_confidence")
+  status          MeshDraftStatus @default(PENDING)
+  auditNotes      String?         @map("audit_notes") @db.Text
+  approvedAt      DateTime?       @map("approved_at") @db.Timestamptz(3)
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+}
+
 model MeshContentItem {
   @@map("mesh_content_item")
   @@unique([sourcePlatform, externalId])
@@ -263,6 +290,7 @@ model MeshContentItem {
   createdAt       DateTime                @default(now()) @map("created_at")
   updatedAt       DateTime                @updatedAt @map("updated_at")
   evaluations     MeshContentEvaluation[]
+  drafts          MeshContentDraft[]
 }
 
 model MeshEventOutbox {

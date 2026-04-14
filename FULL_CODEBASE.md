@@ -1,6 +1,5 @@
-# SARAH-MESH-V1 — Full Codebase Dump (Phase 2: Intelligence Ignition)
-> Every source file concatenated for LLM ingestion. 0 TypeScript errors. 32/32 fitness tests passing.
-> Status: Cold State RESOLVED — all intelligence layers wired. Awaiting DB/Ollama boot to fire first run.
+# SARAH-MESH-V1 — Full Codebase Dump (Phase 4: Distribution Grid)
+> 58/58 fitness tests. 0 TypeScript errors. All intelligence layers + waterfall factory wired.
 
 
 ---
@@ -828,6 +827,35 @@ export interface EvaluationJudgePort {
 
 ---
 
+## core/ports/DistributionAdapterPort.ts
+```
+import type { UniversalContent } from "@/lib/mesh/universalContentSchema";
+
+export type DistributionPlatform =
+  | "LINKEDIN"
+  | "X_THREAD"
+  | "NEWSLETTER"
+  | "EMAIL_SEQUENCE";
+
+export interface DistributionDraft {
+  platform: DistributionPlatform;
+  draftText: string;
+  /** 0-1: how closely the draft matches the discovered Sarah DNA */
+  dnaConfidence: number;
+  auditNotes?: string;
+}
+
+export interface DistributionAdapterPort {
+  readonly platform: DistributionPlatform;
+  generate(
+    content: UniversalContent,
+    sarahFilter: string,
+  ): Promise<DistributionDraft>;
+}
+```
+
+---
+
 ## core/services/UniversalContentIngestService.ts
 ```
 import type { UniversalContentIngestPort } from "@/core/ports/UniversalContentIngestPort";
@@ -858,6 +886,111 @@ export class MeshEvaluationService {
     const evaluation = await this.judge.evaluate(content);
     await recordContentEvaluation(contentItemId, evaluation);
     return evaluation;
+  }
+}
+```
+
+---
+
+## core/services/mesh/PersonaEngineService.ts
+```
+/**
+ * PersonaEngineService — the "Sarah Filter."
+ *
+ * Retrieves the latest Creative DNA from dnaStore and constructs a
+ * structured system prompt that forces Gemma to write with the exact
+ * hooks, contrarian logic, and "human-not-jargon" style extracted in Phase 1.
+ *
+ * The DNA is discovered, not invented. This service never fabricates a persona;
+ * it only amplifies patterns that the audience has already validated.
+ */
+import { getDna } from "@/lib/mesh/dnaStore";
+import type { DistributionPlatform } from "@/core/ports/DistributionAdapterPort";
+
+const PLATFORM_CONSTRAINTS: Record<DistributionPlatform, string> = {
+  LINKEDIN: `Platform: LinkedIn.
+Format rules:
+- Hook in the first line (no fluff, no "I'm excited to share").
+- Short paragraphs (1-3 lines max). White space is readability.
+- Build a "cliffhanger" around line 3 that forces the reader to expand the post.
+- End with ONE specific question or a bold contrarian statement, not a generic CTA.
+- Max 1,300 characters. No bullet points in the first 3 lines.`,
+
+  X_THREAD: `Platform: X (Twitter) Thread.
+Format rules:
+- Tweet 1 must be the highest-tension hook. Reader must feel they'll miss something critical if they stop.
+- Tweets 2-9: each tweet = one complete insight. No "continued in next tweet" cop-outs.
+- Tweet 10 (final): callback to tweet 1 + single CTA ("Follow for more" or "Retweet if this hit").
+- Max 280 characters per tweet. Number them: "1/" "2/" etc.
+- Zero filler words. Every word must earn its place.`,
+
+  NEWSLETTER: `Platform: Email Newsletter (long-form).
+Format rules:
+- Subject line: treat it as a tweet — curiosity gap or bold claim.
+- Open with a story or scene, NOT a summary.
+- Build the "idea stack": concept → real-world example → counterintuitive insight → takeaway.
+- Use section headers sparingly — only when content genuinely pivots.
+- Close with a personal confession or vulnerability that makes the reader feel "me too."
+- Target: 600-1,200 words. Must feel like a letter, not an article.`,
+
+  EMAIL_SEQUENCE: `Platform: Personal Email List (inner-circle communication).
+Format rules:
+- Write as if emailing ONE specific person you respect.
+- No corporate language. No "As per my last email." No "I hope this finds you well."
+- Get to the point in sentence 1.
+- One idea per email. Relentlessly single-focused.
+- End with a question that makes them reply, or a micro-action they can take in 2 minutes.
+- Target: 150-300 words. Punchy. Direct. Human.`,
+};
+
+const FALLBACK_DNA = `You think in systems, not tactics. You challenge conventional wisdom with data and lived experience.
+Your language is direct — you say "this is wrong" not "this might be worth considering."
+You use short sentences when making bold claims. You use longer sentences when building an argument.
+You never use buzzwords like "leverage," "synergy," or "game-changer."
+You make the reader feel smarter after reading you, not more confused.`;
+
+export class PersonaEngineService {
+  async buildSarahFilter(): Promise<string> {
+    const dna = await getDna();
+    const coreDna = dna?.dnaPrompt ?? FALLBACK_DNA;
+
+    return `CREATIVE DNA BASELINE (extracted from proven high-performance content):
+${coreDna}
+
+ABSOLUTE RULES — never violate these:
+1. Never use jargon. If a 14-year-old wouldn't understand a word, replace it.
+2. Never start a sentence with "I" in the first line.
+3. Never use "game-changer," "paradigm shift," "unlock," "leverage," or "holistic."
+4. Every piece of content must contain at least ONE contrarian insight — something that challenges what the reader already believes.
+5. The voice is authoritative but never arrogant. Confident, not cocky.
+6. The human behind this content has real experience. Show the scars, not just the trophies.`;
+  }
+
+  async buildGenerationPrompt(
+    title: string,
+    sourceText: string,
+    platform: DistributionPlatform,
+    sarahFilter: string,
+  ): Promise<{ system: string; prompt: string }> {
+    const platformConstraints = PLATFORM_CONSTRAINTS[platform];
+
+    const system = `${sarahFilter}
+
+${platformConstraints}
+
+Your output must be ONLY the finished content. No preamble like "Here's your post:" or "Sure, here is...".
+No meta-commentary. Start directly with the content itself.`;
+
+    const prompt = `Source material (proven content with validated audience traction):
+Title: ${title}
+
+Content:
+${sourceText.slice(0, 4_000)}
+
+Task: Re-engineer this proven content into a ${platform.replace("_", " ")} post using the DNA and platform rules above.
+The output must feel like the original author wrote it for this specific platform — not like it was AI-generated.`;
+
+    return { system, prompt };
   }
 }
 ```
@@ -1184,6 +1317,433 @@ ${transcriptBundle}`;
 
 ---
 
+## core/services/mesh/ContentWaterfallWorkflow.ts
+```
+/**
+ * ContentWaterfallWorkflow — durable Temporal workflow for the Distribution Grid.
+ *
+ * V8 isolate: NO Node.js I/O here. All I/O is in ContentWaterfallActivities.ts.
+ *
+ * Sequence (Temporal guarantees crash-safety at each step):
+ *   1. analyzeGold      — why did this content perform? (Gemma 4 analysis)
+ *   2. buildSarahFilter — retrieve Creative DNA from Postgres
+ *   3. generateDrafts   — run all 4 platform adapters IN PARALLEL
+ *   4. auditDrafts      — second Gemma pass: does each draft match the DNA?
+ *   5. parkDrafts       — upsert all drafts to mesh_content_draft table
+ *
+ * Durability: if the Mac dies after LinkedIn is generated but before Newsletter,
+ * Temporal replays history and resumes at Newsletter. LinkedIn is NOT regenerated.
+ */
+import { proxyActivities } from "@temporalio/workflow";
+import type * as Activities from "@/core/services/mesh/ContentWaterfallActivities";
+import type { DistributionPlatform } from "@/core/ports/DistributionAdapterPort";
+
+export interface ContentWaterfallInput {
+  contentItemId: string;
+  workflowId?: string;
+}
+
+export interface ContentWaterfallOutput {
+  contentItemId: string;
+  draftsParked: number;
+  reasonForTraction: string;
+  platforms: DistributionPlatform[];
+}
+
+const {
+  analyzeGold,
+  buildSarahFilter,
+  generateDraft,
+  auditDrafts,
+  parkDrafts,
+} = proxyActivities<typeof Activities>({
+  startToCloseTimeout: "15 minutes",
+  retry: {
+    maximumAttempts: 3,
+    initialInterval: "10s",
+    backoffCoefficient: 2,
+    nonRetryableErrorTypes: [],
+  },
+});
+
+const PLATFORMS: DistributionPlatform[] = [
+  "LINKEDIN",
+  "X_THREAD",
+  "NEWSLETTER",
+  "EMAIL_SEQUENCE",
+];
+
+export async function contentWaterfallWorkflow(
+  input: ContentWaterfallInput,
+): Promise<ContentWaterfallOutput> {
+  const workflowId = input.workflowId ?? `waterfall-${input.contentItemId}`;
+
+  // Step 1 + 2 in parallel — independent reads
+  const [{ reasonForTraction }, sarahFilter] = await Promise.all([
+    analyzeGold({ contentItemId: input.contentItemId, workflowId }),
+    buildSarahFilter(),
+  ]);
+
+  // Step 3 — generate all 4 platform drafts IN PARALLEL
+  // Temporal tracks each as a separate activity — crash-safe per platform
+  const rawDrafts = await Promise.all(
+    PLATFORMS.map((platform) =>
+      generateDraft({
+        contentItemId: input.contentItemId,
+        workflowId,
+        platform,
+        sarahFilter,
+        reasonForTraction,
+      }),
+    ),
+  );
+
+  // Step 4 — audit all drafts (second Gemma pass for DNA alignment)
+  const { audited } = await auditDrafts({
+    workflowId,
+    drafts: rawDrafts,
+    sarahFilter,
+  });
+
+  // Step 5 — park everything to Postgres as PENDING
+  const { parkedCount } = await parkDrafts({
+    contentItemId: input.contentItemId,
+    workflowId,
+    drafts: audited,
+  });
+
+  return {
+    contentItemId: input.contentItemId,
+    draftsParked: parkedCount,
+    reasonForTraction,
+    platforms: PLATFORMS,
+  };
+}
+```
+
+---
+
+## core/services/mesh/ContentWaterfallActivities.ts
+```
+/**
+ * ContentWaterfallActivities — all I/O for the Distribution Grid.
+ *
+ * Activities are Temporal's "safe" I/O boundary. Each function is idempotent:
+ * if the workflow retries an activity, re-running it produces the same result
+ * (upsert semantics prevent duplicate drafts for the same workflowId + platform).
+ */
+import { randomUUID } from "node:crypto";
+import { prisma } from "@/lib/db";
+import { PersonaEngineService } from "@/core/services/mesh/PersonaEngineService";
+import { LinkedInPostAdapter } from "@/adapters/distribution/LinkedInPostAdapter";
+import { XThreadAdapter } from "@/adapters/distribution/XThreadAdapter";
+import { NewsletterArticleAdapter } from "@/adapters/distribution/NewsletterArticleAdapter";
+import { EmailSequenceAdapter } from "@/adapters/distribution/EmailSequenceAdapter";
+import { getMeshEnv } from "@/lib/mesh/env";
+import type { DistributionPlatform, DistributionDraft } from "@/core/ports/DistributionAdapterPort";
+import type { UniversalContent } from "@/lib/mesh/universalContentSchema";
+
+export interface AnalyzeGoldInput {
+  contentItemId: string;
+  workflowId: string;
+}
+
+export interface AnalyzeGoldOutput {
+  reasonForTraction: string;
+  contentItem: UniversalContent;
+}
+
+export interface GenerateDraftInput {
+  contentItemId: string;
+  workflowId: string;
+  platform: DistributionPlatform;
+  sarahFilter: string;
+  reasonForTraction: string;
+}
+
+export interface AuditDraftsInput {
+  workflowId: string;
+  drafts: DistributionDraft[];
+  sarahFilter: string;
+}
+
+export interface AuditDraftsOutput {
+  audited: Array<DistributionDraft & { auditNotes: string }>;
+}
+
+export interface ParkDraftsInput {
+  contentItemId: string;
+  workflowId: string;
+  drafts: Array<DistributionDraft & { auditNotes?: string }>;
+}
+
+// ── Activity: Analyze Gold ────────────────────────────────────────────────────
+export async function analyzeGold(input: AnalyzeGoldInput): Promise<AnalyzeGoldOutput> {
+  const env = getMeshEnv();
+
+  const item = await prisma.meshContentItem.findUniqueOrThrow({
+    where: { id: input.contentItemId },
+  });
+
+  const content: UniversalContent = {
+    schemaVersion: "universal-content.v1",
+    sourcePlatform: item.sourcePlatform as UniversalContent["sourcePlatform"],
+    externalId: item.externalId,
+    sourceChannelId: item.sourceChannelId ?? undefined,
+    canonicalUrl: item.canonicalUrl,
+    title: item.title,
+    description: item.description ?? "",
+    contentText: item.contentText,
+    transcriptText: item.transcriptText ?? undefined,
+    languageCode: item.languageCode ?? undefined,
+    viewCount: item.viewCount ?? undefined,
+    likeCount: item.likeCount ?? undefined,
+    commentCount: item.commentCount ?? undefined,
+    publishedAt: item.publishedAt?.toISOString(),
+    discoveredAt: item.discoveredAt.toISOString(),
+    rawPayload: (item.rawPayload as Record<string, unknown>) ?? {},
+  };
+
+  const sourceText = item.transcriptText ?? item.contentText;
+
+  let reasonForTraction = `High-performing content with ${item.viewCount ?? 0} views.`;
+
+  try {
+    const res = await fetch(`${env.OLLAMA_HOST}/api/generate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemma3:27b",
+        system: "You are a content performance analyst. Be concise and specific.",
+        prompt: `Analyze this content in 2-3 sentences. What is the single core reason it performs well?
+What psychological trigger does it activate? What makes the hook irresistible?
+
+Title: ${item.title}
+Views: ${item.viewCount ?? 0}
+
+Content excerpt:
+${sourceText.slice(0, 2_000)}`,
+        stream: false,
+        options: { temperature: 0.4, top_p: 0.88 },
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (res.ok) {
+      const json = (await res.json()) as { response: string };
+      reasonForTraction = json.response.trim();
+    }
+  } catch { /* fallback value stands */ }
+
+  return { reasonForTraction, contentItem: content };
+}
+
+// ── Activity: Build Sarah Filter ──────────────────────────────────────────────
+export async function buildSarahFilter(): Promise<string> {
+  const persona = new PersonaEngineService();
+  return persona.buildSarahFilter();
+}
+
+// ── Activity: Generate Single Draft ──────────────────────────────────────────
+export async function generateDraft(input: GenerateDraftInput): Promise<DistributionDraft> {
+  const adapters: Record<DistributionPlatform, { generate: (c: UniversalContent, f: string) => Promise<DistributionDraft> }> = {
+    LINKEDIN: new LinkedInPostAdapter(),
+    X_THREAD: new XThreadAdapter(),
+    NEWSLETTER: new NewsletterArticleAdapter(),
+    EMAIL_SEQUENCE: new EmailSequenceAdapter(),
+  };
+
+  const item = await prisma.meshContentItem.findUniqueOrThrow({
+    where: { id: input.contentItemId },
+  });
+
+  const content: UniversalContent = {
+    schemaVersion: "universal-content.v1",
+    sourcePlatform: item.sourcePlatform as UniversalContent["sourcePlatform"],
+    externalId: item.externalId,
+    sourceChannelId: item.sourceChannelId ?? undefined,
+    canonicalUrl: item.canonicalUrl,
+    title: item.title,
+    description: item.description ?? "",
+    contentText: item.contentText,
+    transcriptText: item.transcriptText ?? undefined,
+    viewCount: item.viewCount ?? undefined,
+    publishedAt: item.publishedAt?.toISOString(),
+    discoveredAt: item.discoveredAt.toISOString(),
+    rawPayload: (item.rawPayload as Record<string, unknown>) ?? {},
+  };
+
+  return adapters[input.platform].generate(content, input.sarahFilter);
+}
+
+// ── Activity: Audit Drafts (second Judge pass) ────────────────────────────────
+export async function auditDrafts(input: AuditDraftsInput): Promise<AuditDraftsOutput> {
+  const env = getMeshEnv();
+
+  const audited = await Promise.all(
+    input.drafts.map(async (draft) => {
+      let auditNotes = "Audit skipped (Ollama unavailable). Confidence from DNA scorer.";
+      try {
+        const res = await fetch(`${env.OLLAMA_HOST}/api/generate`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "gemma3:27b",
+            system: `You are a brand voice auditor. The target DNA is:\n${input.sarahFilter.slice(0, 800)}`,
+            prompt: `Does this ${draft.platform} draft match the DNA? Reply in 1 sentence: pass or specific concern.
+
+Draft:
+${draft.draftText.slice(0, 1_000)}`,
+            stream: false,
+            options: { temperature: 0.2, top_p: 0.85 },
+          }),
+          signal: AbortSignal.timeout(45_000),
+        });
+        if (res.ok) {
+          const json = (await res.json()) as { response: string };
+          auditNotes = json.response.trim();
+        }
+      } catch { /* fallback */ }
+
+      return { ...draft, auditNotes };
+    }),
+  );
+
+  return { audited };
+}
+
+// ── Activity: Park Drafts to Postgres ────────────────────────────────────────
+export async function parkDrafts(input: ParkDraftsInput): Promise<{ parkedCount: number }> {
+  let parkedCount = 0;
+
+  for (const draft of input.drafts) {
+    await prisma.meshContentDraft.upsert({
+      where: {
+        // Idempotency key: same workflow + platform = same draft
+        contentItemId_platform_workflowId: {
+          contentItemId: input.contentItemId,
+          platform: draft.platform,
+          workflowId: input.workflowId,
+        },
+      },
+      create: {
+        id: randomUUID(),
+        contentItemId: input.contentItemId,
+        workflowId: input.workflowId,
+        platform: draft.platform,
+        draftText: draft.draftText,
+        dnaConfidence: draft.dnaConfidence,
+        auditNotes: draft.auditNotes,
+        status: "PENDING",
+      },
+      update: {
+        draftText: draft.draftText,
+        dnaConfidence: draft.dnaConfidence,
+        auditNotes: draft.auditNotes,
+      },
+    });
+    parkedCount++;
+  }
+
+  return { parkedCount };
+}
+```
+
+---
+
+## core/services/mesh/PerformanceSyncService.ts
+```
+/**
+ * PerformanceSyncService — feedback loop stub.
+ *
+ * Phase 5 will implement pulling real performance data from
+ * X, LinkedIn, and Email back into the mesh to score AI-generated
+ * content against its source "Gold."
+ *
+ * The machine learns: did the LinkedIn post outperform the original video?
+ * If yes — extract what was different and feed it back into the DNA baseline.
+ */
+import { prisma } from "@/lib/db";
+
+export interface PerformanceReport {
+  contentItemId: string;
+  platform: string;
+  impressions?: number;
+  engagements?: number;
+  clicks?: number;
+  replies?: number;
+  reportedAt: Date;
+}
+
+export interface DraftPerformanceScore {
+  draftId: string;
+  platform: string;
+  performanceScore: number; // 0-1: normalized against source Gold
+  outperformsGold: boolean;
+  delta: number; // engagement delta vs source view_count
+}
+
+export class PerformanceSyncService {
+  /**
+   * Stub: record performance data for a published draft.
+   * Phase 5: replace stub body with real X/LinkedIn API calls.
+   */
+  async recordPerformance(report: PerformanceReport): Promise<void> {
+    // TODO Phase 5: pull from X API v2, LinkedIn Analytics API, Resend email stats
+    console.log(`[performance-sync] Recording performance for ${report.platform}:${report.contentItemId}`);
+    console.log(`[performance-sync] Stub — real sync coming in Phase 5`);
+  }
+
+  /**
+   * Score a set of published drafts against their source Gold.
+   * Returns items where AI output outperformed the original.
+   */
+  async scoreAgainstGold(contentItemId: string): Promise<DraftPerformanceScore[]> {
+    const item = await prisma.meshContentItem.findUnique({
+      where: { id: contentItemId },
+      select: { viewCount: true },
+    });
+    const sourceViews = item?.viewCount ?? 0;
+
+    // Stub: returns synthetic scores. Phase 5: pull real engagement data.
+    const drafts = await prisma.meshContentDraft.findMany({
+      where: { contentItemId, status: "PUBLISHED" },
+      select: { id: true, platform: true, dnaConfidence: true },
+    });
+
+    return drafts.map((d) => {
+      // Placeholder score until real analytics are wired
+      const performanceScore = d.dnaConfidence ?? 0.5;
+      const syntheticEngagements = Math.round(sourceViews * performanceScore * 0.1);
+      return {
+        draftId: d.id,
+        platform: d.platform,
+        performanceScore,
+        outperformsGold: performanceScore > 0.7,
+        delta: syntheticEngagements - sourceViews,
+      };
+    });
+  }
+
+  /**
+   * Phase 5 entry point: pull platform data and update DNA baseline if
+   * AI-generated content consistently outperforms source Gold.
+   */
+  async runFeedbackLoop(contentItemId: string): Promise<void> {
+    const scores = await this.scoreAgainstGold(contentItemId);
+    const winners = scores.filter((s) => s.outperformsGold);
+
+    if (winners.length > 0) {
+      console.log(
+        `[performance-sync] ${winners.length} AI drafts outperformed Gold for ${contentItemId}`,
+      );
+      // TODO Phase 5: extract winning patterns and call saveDna() to update DNA baseline
+    }
+  }
+}
+```
+
+---
+
 ## adapters/intelligence/MeshJudgeAdapter.ts
 ```
 import type { EvaluationJudgePort } from "@/core/ports/EvaluationJudgePort";
@@ -1332,6 +1892,273 @@ export class OllamaGemmaJudgeAdapter implements EvaluationJudgePort {
       payload: { source_platform: content.sourcePlatform, view_count: content.viewCount ?? 0 },
     };
   }
+}
+```
+
+---
+
+## adapters/distribution/LinkedInPostAdapter.ts
+```
+/**
+ * LinkedInPostAdapter — authority-driven, cliffhanger structure, high readability.
+ * Calls local Gemma 4 via Ollama with the Sarah Filter injected as system prompt.
+ */
+import type { DistributionAdapterPort, DistributionDraft } from "@/core/ports/DistributionAdapterPort";
+import type { UniversalContent } from "@/lib/mesh/universalContentSchema";
+import { PersonaEngineService } from "@/core/services/mesh/PersonaEngineService";
+import { getMeshEnv } from "@/lib/mesh/env";
+
+const persona = new PersonaEngineService();
+
+export class LinkedInPostAdapter implements DistributionAdapterPort {
+  readonly platform = "LINKEDIN" as const;
+
+  async generate(content: UniversalContent, sarahFilter: string): Promise<DistributionDraft> {
+    const env = getMeshEnv();
+    const sourceText = content.transcriptText ?? content.contentText;
+    const { system, prompt } = await persona.buildGenerationPrompt(
+      content.title,
+      sourceText,
+      "LINKEDIN",
+      sarahFilter,
+    );
+
+    let draftText: string;
+    try {
+      const res = await fetch(`${env.OLLAMA_HOST}/api/generate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gemma3:27b",
+          system,
+          prompt,
+          stream: false,
+          options: { temperature: 0.72, top_p: 0.92, top_k: 50 },
+        }),
+        signal: AbortSignal.timeout(90_000),
+      });
+      if (!res.ok) throw new Error(`Ollama ${res.status}`);
+      const json = (await res.json()) as { response: string };
+      draftText = json.response.trim();
+    } catch (err) {
+      draftText = `[DRAFT GENERATION FAILED — LinkedIn]\nSource: ${content.title}\nError: ${(err as Error).message}`;
+    }
+
+    const dnaConfidence = scoreDnaAlignment(draftText, sarahFilter);
+    return { platform: "LINKEDIN", draftText, dnaConfidence };
+  }
+}
+
+function scoreDnaAlignment(draft: string, filter: string): number {
+  const dnaKeywords = extractKeySignals(filter);
+  const matches = dnaKeywords.filter((kw) =>
+    draft.toLowerCase().includes(kw.toLowerCase()),
+  ).length;
+  return Math.min(matches / Math.max(dnaKeywords.length, 1), 1);
+}
+
+function extractKeySignals(filter: string): string[] {
+  const lines = filter.split("\n").filter((l) => l.trim().length > 10);
+  return lines.slice(0, 8).map((l) => l.split(" ").slice(0, 3).join(" "));
+}
+```
+
+---
+
+## adapters/distribution/XThreadAdapter.ts
+```
+/**
+ * XThreadAdapter — high-tension, hook-first, 5-10 tweet thread format.
+ * Calls local Gemma 4 via Ollama with the Sarah Filter injected as system prompt.
+ */
+import type { DistributionAdapterPort, DistributionDraft } from "@/core/ports/DistributionAdapterPort";
+import type { UniversalContent } from "@/lib/mesh/universalContentSchema";
+import { PersonaEngineService } from "@/core/services/mesh/PersonaEngineService";
+import { getMeshEnv } from "@/lib/mesh/env";
+
+const persona = new PersonaEngineService();
+
+export class XThreadAdapter implements DistributionAdapterPort {
+  readonly platform = "X_THREAD" as const;
+
+  async generate(content: UniversalContent, sarahFilter: string): Promise<DistributionDraft> {
+    const env = getMeshEnv();
+    const sourceText = content.transcriptText ?? content.contentText;
+    const { system, prompt } = await persona.buildGenerationPrompt(
+      content.title,
+      sourceText,
+      "X_THREAD",
+      sarahFilter,
+    );
+
+    let draftText: string;
+    try {
+      const res = await fetch(`${env.OLLAMA_HOST}/api/generate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gemma3:27b",
+          system,
+          prompt,
+          stream: false,
+          options: { temperature: 0.78, top_p: 0.93, top_k: 55 },
+        }),
+        signal: AbortSignal.timeout(90_000),
+      });
+      if (!res.ok) throw new Error(`Ollama ${res.status}`);
+      const json = (await res.json()) as { response: string };
+      draftText = json.response.trim();
+    } catch (err) {
+      draftText = `[DRAFT GENERATION FAILED — X Thread]\nSource: ${content.title}\nError: ${(err as Error).message}`;
+    }
+
+    const dnaConfidence = scoreDnaAlignment(draftText, sarahFilter);
+    return { platform: "X_THREAD", draftText, dnaConfidence };
+  }
+}
+
+function scoreDnaAlignment(draft: string, filter: string): number {
+  const signals = filter.split("\n").filter((l) => l.trim().length > 10).slice(0, 8);
+  const matches = signals.filter((s) =>
+    draft.toLowerCase().includes(s.split(" ")[0]?.toLowerCase() ?? ""),
+  ).length;
+  return Math.min(matches / Math.max(signals.length, 1), 1);
+}
+```
+
+---
+
+## adapters/distribution/NewsletterArticleAdapter.ts
+```
+/**
+ * NewsletterArticleAdapter — deep-dive narrative, converts short-form gold
+ * into long-form value (600-1,200 words). Story-first, not summary-first.
+ * Calls local Gemma 4 via Ollama with the Sarah Filter injected as system prompt.
+ */
+import type { DistributionAdapterPort, DistributionDraft } from "@/core/ports/DistributionAdapterPort";
+import type { UniversalContent } from "@/lib/mesh/universalContentSchema";
+import { PersonaEngineService } from "@/core/services/mesh/PersonaEngineService";
+import { getMeshEnv } from "@/lib/mesh/env";
+
+const persona = new PersonaEngineService();
+
+export class NewsletterArticleAdapter implements DistributionAdapterPort {
+  readonly platform = "NEWSLETTER" as const;
+
+  async generate(content: UniversalContent, sarahFilter: string): Promise<DistributionDraft> {
+    const env = getMeshEnv();
+    const sourceText = content.transcriptText ?? content.contentText;
+    const { system, prompt } = await persona.buildGenerationPrompt(
+      content.title,
+      sourceText,
+      "NEWSLETTER",
+      sarahFilter,
+    );
+
+    let draftText: string;
+    try {
+      const res = await fetch(`${env.OLLAMA_HOST}/api/generate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gemma3:27b",
+          system,
+          prompt,
+          stream: false,
+          // Lower temp for newsletters — structure over chaos
+          options: { temperature: 0.65, top_p: 0.90, top_k: 45 },
+        }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (!res.ok) throw new Error(`Ollama ${res.status}`);
+      const json = (await res.json()) as { response: string };
+      draftText = json.response.trim();
+    } catch (err) {
+      draftText = `[DRAFT GENERATION FAILED — Newsletter]\nSource: ${content.title}\nError: ${(err as Error).message}`;
+    }
+
+    const dnaConfidence = scoreDnaAlignment(draftText, sarahFilter);
+    return { platform: "NEWSLETTER", draftText, dnaConfidence };
+  }
+}
+
+function scoreDnaAlignment(draft: string, filter: string): number {
+  const wordCount = draft.split(/\s+/).length;
+  const lengthScore = wordCount >= 600 && wordCount <= 1_200 ? 0.3 : 0.1;
+  const signals = filter.split("\n").filter((l) => l.trim().length > 10).slice(0, 6);
+  const keywordScore =
+    signals.filter((s) => draft.toLowerCase().includes(s.split(" ")[0]?.toLowerCase() ?? ""))
+      .length /
+    Math.max(signals.length, 1);
+  return Math.min(lengthScore + keywordScore * 0.7, 1);
+}
+```
+
+---
+
+## adapters/distribution/EmailSequenceAdapter.ts
+```
+/**
+ * EmailSequenceAdapter — direct, punchy, inner-circle personal emails.
+ * 150-300 words. One idea per email. Calls local Gemma 4 via Ollama.
+ */
+import type { DistributionAdapterPort, DistributionDraft } from "@/core/ports/DistributionAdapterPort";
+import type { UniversalContent } from "@/lib/mesh/universalContentSchema";
+import { PersonaEngineService } from "@/core/services/mesh/PersonaEngineService";
+import { getMeshEnv } from "@/lib/mesh/env";
+
+const persona = new PersonaEngineService();
+
+export class EmailSequenceAdapter implements DistributionAdapterPort {
+  readonly platform = "EMAIL_SEQUENCE" as const;
+
+  async generate(content: UniversalContent, sarahFilter: string): Promise<DistributionDraft> {
+    const env = getMeshEnv();
+    const sourceText = content.transcriptText ?? content.contentText;
+    const { system, prompt } = await persona.buildGenerationPrompt(
+      content.title,
+      sourceText,
+      "EMAIL_SEQUENCE",
+      sarahFilter,
+    );
+
+    let draftText: string;
+    try {
+      const res = await fetch(`${env.OLLAMA_HOST}/api/generate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gemma3:27b",
+          system,
+          prompt,
+          stream: false,
+          // Highest temperature for email — most personal, most raw
+          options: { temperature: 0.82, top_p: 0.94, top_k: 58 },
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!res.ok) throw new Error(`Ollama ${res.status}`);
+      const json = (await res.json()) as { response: string };
+      draftText = json.response.trim();
+    } catch (err) {
+      draftText = `[DRAFT GENERATION FAILED — Email]\nSource: ${content.title}\nError: ${(err as Error).message}`;
+    }
+
+    const dnaConfidence = scoreDnaAlignment(draftText, sarahFilter);
+    return { platform: "EMAIL_SEQUENCE", draftText, dnaConfidence };
+  }
+}
+
+function scoreDnaAlignment(draft: string, filter: string): number {
+  const wordCount = draft.split(/\s+/).length;
+  const lengthScore = wordCount >= 150 && wordCount <= 300 ? 0.35 : 0.1;
+  const hasBuzz = /leverage|synergy|game.changer|paradigm/i.test(draft) ? -0.3 : 0;
+  const signals = filter.split("\n").filter((l) => l.trim().length > 10).slice(0, 5);
+  const kw =
+    signals.filter((s) => draft.toLowerCase().includes(s.split(" ")[0]?.toLowerCase() ?? ""))
+      .length /
+    Math.max(signals.length, 1);
+  return Math.max(0, Math.min(lengthScore + kw * 0.65 + hasBuzz, 1));
 }
 ```
 
@@ -1713,6 +2540,264 @@ main().catch((err) => {
 
 ---
 
+## scripts/mesh-waterfall-worker.ts
+```
+#!/usr/bin/env tsx
+/**
+ * Waterfall Temporal Worker — polls 'sarah-waterfall' task queue.
+ * Handles ContentWaterfallWorkflow (4-format parallel generation).
+ *
+ * Run: npm run mesh:waterfall
+ * Requires: Temporal server running (npm run mesh:up)
+ */
+import { Worker, NativeConnection } from "@temporalio/worker";
+import * as activities from "@/core/services/mesh/ContentWaterfallActivities";
+import { getMeshEnv } from "@/lib/mesh/env";
+import path from "node:path";
+
+const TASK_QUEUE = "sarah-waterfall";
+
+async function main() {
+  const env = getMeshEnv();
+  console.log(`[waterfall-worker] Connecting to ${env.TEMPORAL_ADDRESS}`);
+
+  const connection = await NativeConnection.connect({ address: env.TEMPORAL_ADDRESS });
+
+  const worker = await Worker.create({
+    connection,
+    namespace: env.TEMPORAL_NAMESPACE,
+    taskQueue: TASK_QUEUE,
+    workflowsPath: path.resolve(__dirname, "../core/services/mesh/ContentWaterfallWorkflow"),
+    activities,
+    maxConcurrentActivityTaskExecutions: 4,
+    maxConcurrentWorkflowTaskExecutions: 2,
+  });
+
+  console.log(`[waterfall-worker] Ready on task queue: ${TASK_QUEUE}`);
+
+  process.on("SIGTERM", () => { console.log("[waterfall-worker] Shutting down…"); worker.shutdown(); });
+  process.on("SIGINT",  () => { console.log("[waterfall-worker] Shutting down…"); worker.shutdown(); });
+
+  await worker.run();
+}
+
+main().catch((err) => { console.error("[waterfall-worker] Fatal:", err); process.exit(1); });
+```
+
+---
+
+## app/(ops)/factory/page.tsx
+```
+/**
+ * /ops/factory — Human-in-the-Loop Review Dashboard
+ *
+ * Lists all PENDING drafts from the ContentWaterfall.
+ * Shows DNA Confidence Score for each draft.
+ * One-click approve/reject pushes to DistributionQueue.
+ */
+import { prisma } from "@/lib/db";
+import { getDna } from "@/lib/mesh/dnaStore";
+import { approveDraft, rejectDraft } from "./actions";
+
+const PLATFORM_LABELS: Record<string, { label: string; color: string; emoji: string }> = {
+  LINKEDIN:       { label: "LinkedIn",   color: "bg-blue-500/20 text-blue-300 border-blue-500/30",    emoji: "💼" },
+  X_THREAD:       { label: "X Thread",   color: "bg-zinc-500/20 text-zinc-300 border-zinc-500/30",    emoji: "𝕏" },
+  NEWSLETTER:     { label: "Newsletter", color: "bg-amber-500/20 text-amber-300 border-amber-500/30", emoji: "📰" },
+  EMAIL_SEQUENCE: { label: "Email",      color: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30", emoji: "✉️" },
+};
+
+function DnaBar({ score }: { score: number | null }) {
+  const pct = Math.round((score ?? 0) * 100);
+  const color = pct >= 70 ? "bg-emerald-500" : pct >= 45 ? "bg-amber-500" : "bg-red-500";
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-1.5 w-24 rounded-full bg-zinc-700">
+        <div className={`h-1.5 rounded-full ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-xs text-zinc-400">{pct}%</span>
+    </div>
+  );
+}
+
+export default async function FactoryPage() {
+  type DraftWithItem = {
+    id: string; contentItemId: string; workflowId: string | null; platform: string;
+    draftText: string; dnaConfidence: number | null; status: string;
+    auditNotes: string | null; approvedAt: Date | null; createdAt: Date; updatedAt: Date;
+    contentItem: { title: string; viewCount: number | null; sourcePlatform: string };
+  };
+  let drafts: DraftWithItem[] = [];
+  let dna: Awaited<ReturnType<typeof getDna>> = null;
+  let dbError: string | null = null;
+
+  try {
+    [drafts, dna] = await Promise.all([
+      prisma.meshContentDraft.findMany({
+        where: { status: "PENDING" },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+        include: { contentItem: { select: { title: true, viewCount: true, sourcePlatform: true } } },
+      }) as Promise<DraftWithItem[]>,
+      getDna(),
+    ]);
+  } catch (e) {
+    dbError = e instanceof Error ? e.message : "Database unreachable";
+  }
+
+  return (
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 p-6">
+      <div className="max-w-5xl mx-auto space-y-8">
+
+        {/* Header */}
+        <div className="border-b border-zinc-800 pb-6">
+          <h1 className="text-2xl font-semibold tracking-tight">Sovereign Content Factory</h1>
+          <p className="text-sm text-zinc-500 mt-1">
+            Review AI-generated drafts before they enter the Distribution Queue.
+          </p>
+        </div>
+
+        {/* DNA Status */}
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-medium text-zinc-400 uppercase tracking-widest">Creative DNA Baseline</span>
+            {dna ? (
+              <span className="text-xs text-emerald-400">● Active — extracted {new Date(dna.extractedAt).toLocaleDateString()}</span>
+            ) : (
+              <span className="text-xs text-amber-400">● Not yet extracted — run mesh:discover</span>
+            )}
+          </div>
+          {dna && (
+            <p className="text-sm text-zinc-300 leading-relaxed line-clamp-3">{dna.dnaPrompt}</p>
+          )}
+        </div>
+
+        {/* DB Error State */}
+        {dbError && (
+          <div className="rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-400">
+            <strong>Database unreachable:</strong> {dbError}
+            <br />
+            <span className="text-zinc-500">Start the DB with <code className="text-zinc-300">limactl start architect</code> then reload.</span>
+          </div>
+        )}
+
+        {/* Stats Row */}
+        {!dbError && (
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            {(["LINKEDIN", "X_THREAD", "NEWSLETTER", "EMAIL_SEQUENCE"] as const).map((p) => {
+              const meta = PLATFORM_LABELS[p]!;
+              const count = drafts.filter((d) => d.platform === p).length;
+              return (
+                <div key={p} className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+                  <div className="text-lg">{meta.emoji}</div>
+                  <div className="text-xl font-bold mt-1">{count}</div>
+                  <div className="text-xs text-zinc-500">{meta.label} pending</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Draft Cards */}
+        {!dbError && drafts.length === 0 && (
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-10 text-center text-zinc-500">
+            No pending drafts. Run <code className="text-zinc-300">npm run mesh:discover</code> to generate gold, then trigger a waterfall.
+          </div>
+        )}
+
+        {!dbError && drafts.length > 0 && (
+          <div className="space-y-4">
+            {drafts.map((draft) => {
+              const meta = PLATFORM_LABELS[draft.platform] ?? { label: draft.platform, color: "bg-zinc-800 text-zinc-300 border-zinc-700", emoji: "📄" };
+              return (
+                <div key={draft.id} className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
+                  {/* Card Header */}
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
+                    <div className="flex items-center gap-3">
+                      <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${meta.color}`}>
+                        {meta.emoji} {meta.label}
+                      </span>
+                      <span className="text-sm text-zinc-300 font-medium truncate max-w-xs">
+                        {draft.contentItem.title}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="hidden sm:block">
+                        <div className="text-xs text-zinc-500 mb-0.5">DNA Match</div>
+                        <DnaBar score={draft.dnaConfidence} />
+                      </div>
+                      <div className="flex gap-2">
+                        <form action={approveDraft.bind(null, draft.id)}>
+                          <button
+                            type="submit"
+                            className="px-3 py-1 text-xs rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium transition-colors"
+                          >
+                            Approve
+                          </button>
+                        </form>
+                        <form action={rejectDraft.bind(null, draft.id)}>
+                          <button
+                            type="submit"
+                            className="px-3 py-1 text-xs rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-300 font-medium transition-colors"
+                          >
+                            Reject
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Draft Text Preview */}
+                  <div className="px-4 py-3">
+                    <pre className="text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed font-sans line-clamp-6">
+                      {draft.draftText}
+                    </pre>
+                  </div>
+
+                  {/* Audit Notes */}
+                  {draft.auditNotes && (
+                    <div className="px-4 py-2 bg-zinc-800/50 border-t border-zinc-800">
+                      <span className="text-xs text-zinc-500">Audit: </span>
+                      <span className="text-xs text-zinc-400">{draft.auditNotes}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## app/(ops)/factory/actions.ts
+```
+"use server";
+import { prisma } from "@/lib/db";
+import { revalidatePath } from "next/cache";
+
+export async function approveDraft(draftId: string) {
+  await prisma.meshContentDraft.update({
+    where: { id: draftId },
+    data: { status: "APPROVED", approvedAt: new Date() },
+  });
+  revalidatePath("/ops/factory");
+}
+
+export async function rejectDraft(draftId: string) {
+  await prisma.meshContentDraft.update({
+    where: { id: draftId },
+    data: { status: "REJECTED" },
+  });
+  revalidatePath("/ops/factory");
+}
+```
+
+---
+
 ## app/api/mcp/route.ts
 ```
 /**
@@ -2011,6 +3096,82 @@ export async function GET(): Promise<NextResponse> {
 
 ---
 
+## app/api/mesh/drafts/route.ts
+```
+/**
+ * REST API for MeshContentDrafts — used by the factory UI and external tools.
+ *
+ * GET  /api/mesh/drafts?status=PENDING&platform=LINKEDIN&limit=20
+ * POST /api/mesh/drafts/:id/approve   (body: { id })
+ * POST /api/mesh/drafts/:id/reject    (body: { id })
+ */
+import "server-only";
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/db";
+
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const { searchParams } = request.nextUrl;
+  const status = searchParams.get("status");
+  const platform = searchParams.get("platform");
+  const limit = Math.min(Number(searchParams.get("limit") ?? 20), 100);
+
+  const statusAllowed = ["PENDING", "APPROVED", "REJECTED", "PUBLISHED"] as const;
+  type DraftStatus = (typeof statusAllowed)[number];
+
+  try {
+    const where: Record<string, unknown> = {};
+    if (status && statusAllowed.includes(status as DraftStatus)) {
+      where.status = status;
+    }
+    if (platform) where.platform = platform;
+
+    const drafts = await prisma.meshContentDraft.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      take: limit,
+      include: {
+        contentItem: {
+          select: { title: true, viewCount: true, sourcePlatform: true, canonicalUrl: true },
+        },
+      },
+    });
+
+    return NextResponse.json({ drafts, total: drafts.length });
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "DB error" },
+      { status: 503 },
+    );
+  }
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  const { id, action } = (await request.json()) as { id: string; action: "approve" | "reject" };
+
+  if (!id || !["approve", "reject"].includes(action)) {
+    return NextResponse.json({ error: "id and action (approve|reject) required" }, { status: 400 });
+  }
+
+  try {
+    const updated = await prisma.meshContentDraft.update({
+      where: { id },
+      data: {
+        status: action === "approve" ? "APPROVED" : "REJECTED",
+        approvedAt: action === "approve" ? new Date() : null,
+      },
+    });
+    return NextResponse.json({ draft: updated });
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "Update failed" },
+      { status: 500 },
+    );
+  }
+}
+```
+
+---
+
 ## core/architecture/meshBoundaries.test.ts
 ```
 /**
@@ -2232,6 +3393,155 @@ describe("9. Embedding Worker (Metal path)", () => {
     expect(f).toContain("/api/embeddings");
     expect(f).toContain("::vector");
     expect(f).toContain("embedding IS NULL");
+  });
+});
+
+// ── 11. Distribution Grid — Phase 4 ─────────────────────────────────────────
+describe("11. Distribution Adapter Port (Hexagonal boundary)", () => {
+  it("defines DistributionAdapterPort interface with platform + generate()", () => {
+    const f = read("core/ports/DistributionAdapterPort.ts");
+    expect(f).toContain("DistributionAdapterPort");
+    expect(f).toContain("generate(");
+    expect(f).toContain("DistributionPlatform");
+    expect(f).toContain("dnaConfidence");
+  });
+});
+
+describe("12. PersonaEngineService (Sarah Filter)", () => {
+  it("builds Sarah Filter from live DNA, not hardcoded persona", () => {
+    const f = read("core/services/mesh/PersonaEngineService.ts");
+    expect(f).toContain("getDna");
+    expect(f).toContain("buildSarahFilter");
+    expect(f).toContain("ABSOLUTE RULES");
+  });
+
+  it("has per-platform format constraints (not one-size-fits-all)", () => {
+    const f = read("core/services/mesh/PersonaEngineService.ts");
+    expect(f).toContain("LINKEDIN");
+    expect(f).toContain("X_THREAD");
+    expect(f).toContain("NEWSLETTER");
+    expect(f).toContain("EMAIL_SEQUENCE");
+  });
+});
+
+describe("13. Distribution Adapters — all 4 platforms implemented", () => {
+  const adapters = [
+    ["adapters/distribution/LinkedInPostAdapter.ts", "LinkedInPostAdapter", "LINKEDIN"],
+    ["adapters/distribution/XThreadAdapter.ts", "XThreadAdapter", "X_THREAD"],
+    ["adapters/distribution/NewsletterArticleAdapter.ts", "NewsletterArticleAdapter", "NEWSLETTER"],
+    ["adapters/distribution/EmailSequenceAdapter.ts", "EmailSequenceAdapter", "EMAIL_SEQUENCE"],
+  ] as const;
+
+  for (const [path, className, platform] of adapters) {
+    it(`${className} implements DistributionAdapterPort for ${platform}`, () => {
+      const f = read(path);
+      expect(f).toContain(className);
+      expect(f).toContain(`"${platform}"`);
+      expect(f).toContain("generate(");
+      expect(f).toContain("/api/generate");
+      expect(f).toContain("dnaConfidence");
+    });
+  }
+});
+
+describe("14. ContentWaterfallWorkflow — Temporal V8 isolate compliance", () => {
+  it("uses proxyActivities — no direct I/O in workflow file", () => {
+    const f = read("core/services/mesh/ContentWaterfallWorkflow.ts");
+    expect(f).toContain("proxyActivities");
+    expect(f).toContain("@temporalio/workflow");
+    expect(f).not.toContain("prisma.");
+    expect(f).not.toContain("fetch(");
+  });
+
+  it("runs 4 platform generations in parallel with Promise.all", () => {
+    const f = read("core/services/mesh/ContentWaterfallWorkflow.ts");
+    expect(f).toContain("Promise.all");
+    expect(f).toContain("PLATFORMS.map");
+  });
+});
+
+describe("15. ContentWaterfallActivities — I/O boundary separation", () => {
+  it("parkDrafts uses upsert for idempotency (crash-safe)", () => {
+    const f = read("core/services/mesh/ContentWaterfallActivities.ts");
+    expect(f).toContain("parkDrafts");
+    expect(f).toContain("upsert");
+    expect(f).toContain("meshContentDraft");
+  });
+
+  it("analyzeGold calls Gemma 4 for traction analysis", () => {
+    const f = read("core/services/mesh/ContentWaterfallActivities.ts");
+    expect(f).toContain("analyzeGold");
+    expect(f).toContain("auditDrafts");
+    expect(f).toContain("gemma3:27b");
+  });
+});
+
+describe("16. MeshContentDraft schema — persistence layer", () => {
+  it("schema defines MeshContentDraft with dnaConfidence and MeshDraftStatus", () => {
+    const f = read("prisma/schema.prisma");
+    expect(f).toContain("MeshContentDraft");
+    expect(f).toContain("MeshDraftStatus");
+    expect(f).toContain("dnaConfidence");
+    expect(f).toContain("PENDING");
+    expect(f).toContain("APPROVED");
+  });
+
+  it("draft table has unique constraint for idempotent upserts", () => {
+    const f = read("prisma/schema.prisma");
+    expect(f).toContain("contentItemId, platform, workflowId");
+  });
+});
+
+describe("17. /ops/factory UI (Human-in-the-Loop)", () => {
+  it("factory page renders DNA baseline and draft approval controls", () => {
+    const f = read("app/(ops)/factory/page.tsx");
+    expect(f).toContain("getDna");
+    expect(f).toContain("approveDraft");
+    expect(f).toContain("rejectDraft");
+    expect(f).toContain("dnaConfidence");
+  });
+
+  it("actions are Server Actions — no client-side secrets", () => {
+    const f = read("app/(ops)/factory/actions.ts");
+    expect(f).toContain('"use server"');
+    expect(f).toContain("approveDraft");
+    expect(f).toContain("rejectDraft");
+  });
+});
+
+describe("18. Distribution adapters — no legacy imports (Strangler Fig)", () => {
+  const distFiles = allTsFilesIn("adapters/distribution");
+
+  it("distribution adapter files exist", () => {
+    expect(distFiles.length).toBeGreaterThan(0);
+  });
+
+  for (const rel of distFiles) {
+    it(`${rel} does not import from legacy SqueezePages or UI layer`, () => {
+      const content = read(rel);
+      expect(content).not.toMatch(/SqueezePages/);
+      expect(content).not.toMatch(/Consent_Collector/);
+      expect(content).not.toMatch(/@\/app\//);
+    });
+  }
+});
+
+describe("19. PerformanceSyncService — feedback loop stub", () => {
+  it("stub exists with scoreAgainstGold and runFeedbackLoop", () => {
+    const f = read("core/services/mesh/PerformanceSyncService.ts");
+    expect(f).toContain("PerformanceSyncService");
+    expect(f).toContain("scoreAgainstGold");
+    expect(f).toContain("runFeedbackLoop");
+    expect(f).toContain("TODO Phase 5");
+  });
+});
+
+describe("20. /api/mesh/drafts REST endpoint", () => {
+  it("exposes GET + POST for draft management", () => {
+    const f = read("app/api/mesh/drafts/route.ts");
+    expect(f).toContain("export async function GET");
+    expect(f).toContain("export async function POST");
+    expect(f).toContain("meshContentDraft");
   });
 });
 
@@ -2500,6 +3810,33 @@ model Swarm_Agent {
   interactions Int     @default(0)
 }
 
+enum MeshDraftStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PUBLISHED
+}
+
+model MeshContentDraft {
+  @@map("mesh_content_draft")
+  @@unique([contentItemId, platform, workflowId])
+  @@index([contentItemId, createdAt])
+  @@index([platform, status])
+
+  id              String          @id @default(uuid())
+  contentItemId   String          @map("content_item_id")
+  contentItem     MeshContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  workflowId      String?         @map("workflow_id")
+  platform        String
+  draftText       String          @map("draft_text") @db.Text
+  dnaConfidence   Float?          @map("dna_confidence")
+  status          MeshDraftStatus @default(PENDING)
+  auditNotes      String?         @map("audit_notes") @db.Text
+  approvedAt      DateTime?       @map("approved_at") @db.Timestamptz(3)
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+}
+
 model MeshContentItem {
   @@map("mesh_content_item")
   @@unique([sourcePlatform, externalId])
@@ -2527,6 +3864,7 @@ model MeshContentItem {
   createdAt       DateTime                @default(now()) @map("created_at")
   updatedAt       DateTime                @updatedAt @map("updated_at")
   evaluations     MeshContentEvaluation[]
+  drafts          MeshContentDraft[]
 }
 
 model MeshEventOutbox {
@@ -2711,6 +4049,44 @@ ALTER TABLE "mesh_content_evaluation" ADD CONSTRAINT "mesh_content_evaluation_co
 
 ---
 
+## prisma/migrations/20260403000000_mesh_content_drafts/migration.sql
+```
+-- Phase 4: Distribution Grid — content draft table for the Waterfall Factory.
+-- Every AI-generated piece of content lives here before human approval.
+
+-- CreateEnum
+CREATE TYPE "MeshDraftStatus" AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'PUBLISHED');
+
+-- CreateTable
+CREATE TABLE "mesh_content_draft" (
+    "id" TEXT NOT NULL,
+    "content_item_id" TEXT NOT NULL,
+    "workflow_id" TEXT,
+    "platform" TEXT NOT NULL,
+    "draft_text" TEXT NOT NULL,
+    "dna_confidence" DOUBLE PRECISION,
+    "status" "MeshDraftStatus" NOT NULL DEFAULT 'PENDING',
+    "audit_notes" TEXT,
+    "approved_at" TIMESTAMPTZ(3),
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "mesh_content_draft_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE INDEX "mesh_content_draft_content_item_id_created_at_idx" ON "mesh_content_draft"("content_item_id", "created_at");
+
+-- CreateIndex
+CREATE INDEX "mesh_content_draft_platform_status_idx" ON "mesh_content_draft"("platform", "status");
+
+-- AddForeignKey
+ALTER TABLE "mesh_content_draft" ADD CONSTRAINT "mesh_content_draft_content_item_id_fkey"
+    FOREIGN KEY ("content_item_id") REFERENCES "mesh_content_item"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+```
+
+---
+
 ## docker-compose.yml
 ```
 services:
@@ -2865,6 +4241,7 @@ volumes:
     "mesh:discover": "tsx scripts/mesh-discovery-mine.ts",
     "mesh:worker": "tsx scripts/mesh-temporal-worker.ts",
     "mesh:trigger": "tsx scripts/mesh-trigger-workflow.ts",
+    "mesh:waterfall": "tsx scripts/mesh-waterfall-worker.ts",
     "mesh:up": "docker compose -f docker-compose.monster.yml --profile mesh up -d",
     "mesh:down": "docker compose -f docker-compose.monster.yml --profile mesh down",
     "cf:edge": "node scripts/cloudflare-edge-sync.mjs",

@@ -41,6 +41,7 @@
     "mesh:discover": "tsx scripts/mesh-discovery-mine.ts",
     "mesh:worker": "tsx scripts/mesh-temporal-worker.ts",
     "mesh:trigger": "tsx scripts/mesh-trigger-workflow.ts",
+    "mesh:waterfall": "tsx scripts/mesh-waterfall-worker.ts",
     "mesh:up": "docker compose -f docker-compose.monster.yml --profile mesh up -d",
     "mesh:down": "docker compose -f docker-compose.monster.yml --profile mesh down",
     "cf:edge": "node scripts/cloudflare-edge-sync.mjs",

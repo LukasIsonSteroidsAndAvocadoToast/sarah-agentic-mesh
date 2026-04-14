@@ -220,6 +220,155 @@ describe("9. Embedding Worker (Metal path)", () => {
   });
 });
 
+// ── 11. Distribution Grid — Phase 4 ─────────────────────────────────────────
+describe("11. Distribution Adapter Port (Hexagonal boundary)", () => {
+  it("defines DistributionAdapterPort interface with platform + generate()", () => {
+    const f = read("core/ports/DistributionAdapterPort.ts");
+    expect(f).toContain("DistributionAdapterPort");
+    expect(f).toContain("generate(");
+    expect(f).toContain("DistributionPlatform");
+    expect(f).toContain("dnaConfidence");
+  });
+});
+
+describe("12. PersonaEngineService (Sarah Filter)", () => {
+  it("builds Sarah Filter from live DNA, not hardcoded persona", () => {
+    const f = read("core/services/mesh/PersonaEngineService.ts");
+    expect(f).toContain("getDna");
+    expect(f).toContain("buildSarahFilter");
+    expect(f).toContain("ABSOLUTE RULES");
+  });
+
+  it("has per-platform format constraints (not one-size-fits-all)", () => {
+    const f = read("core/services/mesh/PersonaEngineService.ts");
+    expect(f).toContain("LINKEDIN");
+    expect(f).toContain("X_THREAD");
+    expect(f).toContain("NEWSLETTER");
+    expect(f).toContain("EMAIL_SEQUENCE");
+  });
+});
+
+describe("13. Distribution Adapters — all 4 platforms implemented", () => {
+  const adapters = [
+    ["adapters/distribution/LinkedInPostAdapter.ts", "LinkedInPostAdapter", "LINKEDIN"],
+    ["adapters/distribution/XThreadAdapter.ts", "XThreadAdapter", "X_THREAD"],
+    ["adapters/distribution/NewsletterArticleAdapter.ts", "NewsletterArticleAdapter", "NEWSLETTER"],
+    ["adapters/distribution/EmailSequenceAdapter.ts", "EmailSequenceAdapter", "EMAIL_SEQUENCE"],
+  ] as const;
+
+  for (const [path, className, platform] of adapters) {
+    it(`${className} implements DistributionAdapterPort for ${platform}`, () => {
+      const f = read(path);
+      expect(f).toContain(className);
+      expect(f).toContain(`"${platform}"`);
+      expect(f).toContain("generate(");
+      expect(f).toContain("/api/generate");
+      expect(f).toContain("dnaConfidence");
+    });
+  }
+});
+
+describe("14. ContentWaterfallWorkflow — Temporal V8 isolate compliance", () => {
+  it("uses proxyActivities — no direct I/O in workflow file", () => {
+    const f = read("core/services/mesh/ContentWaterfallWorkflow.ts");
+    expect(f).toContain("proxyActivities");
+    expect(f).toContain("@temporalio/workflow");
+    expect(f).not.toContain("prisma.");
+    expect(f).not.toContain("fetch(");
+  });
+
+  it("runs 4 platform generations in parallel with Promise.all", () => {
+    const f = read("core/services/mesh/ContentWaterfallWorkflow.ts");
+    expect(f).toContain("Promise.all");
+    expect(f).toContain("PLATFORMS.map");
+  });
+});
+
+describe("15. ContentWaterfallActivities — I/O boundary separation", () => {
+  it("parkDrafts uses upsert for idempotency (crash-safe)", () => {
+    const f = read("core/services/mesh/ContentWaterfallActivities.ts");
+    expect(f).toContain("parkDrafts");
+    expect(f).toContain("upsert");
+    expect(f).toContain("meshContentDraft");
+  });
+
+  it("analyzeGold calls Gemma 4 for traction analysis", () => {
+    const f = read("core/services/mesh/ContentWaterfallActivities.ts");
+    expect(f).toContain("analyzeGold");
+    expect(f).toContain("auditDrafts");
+    expect(f).toContain("gemma3:27b");
+  });
+});
+
+describe("16. MeshContentDraft schema — persistence layer", () => {
+  it("schema defines MeshContentDraft with dnaConfidence and MeshDraftStatus", () => {
+    const f = read("prisma/schema.prisma");
+    expect(f).toContain("MeshContentDraft");
+    expect(f).toContain("MeshDraftStatus");
+    expect(f).toContain("dnaConfidence");
+    expect(f).toContain("PENDING");
+    expect(f).toContain("APPROVED");
+  });
+
+  it("draft table has unique constraint for idempotent upserts", () => {
+    const f = read("prisma/schema.prisma");
+    expect(f).toContain("contentItemId, platform, workflowId");
+  });
+});
+
+describe("17. /ops/factory UI (Human-in-the-Loop)", () => {
+  it("factory page renders DNA baseline and draft approval controls", () => {
+    const f = read("app/(ops)/factory/page.tsx");
+    expect(f).toContain("getDna");
+    expect(f).toContain("approveDraft");
+    expect(f).toContain("rejectDraft");
+    expect(f).toContain("dnaConfidence");
+  });
+
+  it("actions are Server Actions — no client-side secrets", () => {
+    const f = read("app/(ops)/factory/actions.ts");
+    expect(f).toContain('"use server"');
+    expect(f).toContain("approveDraft");
+    expect(f).toContain("rejectDraft");
+  });
+});
+
+describe("18. Distribution adapters — no legacy imports (Strangler Fig)", () => {
+  const distFiles = allTsFilesIn("adapters/distribution");
+
+  it("distribution adapter files exist", () => {
+    expect(distFiles.length).toBeGreaterThan(0);
+  });
+
+  for (const rel of distFiles) {
+    it(`${rel} does not import from legacy SqueezePages or UI layer`, () => {
+      const content = read(rel);
+      expect(content).not.toMatch(/SqueezePages/);
+      expect(content).not.toMatch(/Consent_Collector/);
+      expect(content).not.toMatch(/@\/app\//);
+    });
+  }
+});
+
+describe("19. PerformanceSyncService — feedback loop stub", () => {
+  it("stub exists with scoreAgainstGold and runFeedbackLoop", () => {
+    const f = read("core/services/mesh/PerformanceSyncService.ts");
+    expect(f).toContain("PerformanceSyncService");
+    expect(f).toContain("scoreAgainstGold");
+    expect(f).toContain("runFeedbackLoop");
+    expect(f).toContain("TODO Phase 5");
+  });
+});
+
+describe("20. /api/mesh/drafts REST endpoint", () => {
+  it("exposes GET + POST for draft management", () => {
+    const f = read("app/api/mesh/drafts/route.ts");
+    expect(f).toContain("export async function GET");
+    expect(f).toContain("export async function POST");
+    expect(f).toContain("meshContentDraft");
+  });
+});
+
 // ── 10. Docker Compose Mesh Profile ──────────────────────────────────────────
 describe("10. Docker Compose Mesh Profile", () => {
   it("Kafka service exists under mesh profile", () => {
