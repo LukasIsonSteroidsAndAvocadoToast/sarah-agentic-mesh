@@ -1,12 +1,12 @@
-# SARAH-MESH-V1 — Full Codebase Dump (Intelligence Ignition Build)
-> Every source file in this repository, concatenated for LLM ingestion.
-> Architecture: Hexagonal. Event-sourced. Kafka KRaft. Temporal SDK. pgvector. MCP Hub v2. Gemma 4 DNA.
+# SARAH-MESH-V1 — Full Codebase Dump (Phase 2: Intelligence Ignition)
+> Every source file concatenated for LLM ingestion. 0 TypeScript errors. 32/32 fitness tests passing.
+> Status: Cold State RESOLVED — all intelligence layers wired. Awaiting DB/Ollama boot to fire first run.
 
 
 ---
 
 ## lib/mesh/universalContentSchema.ts
-```typescript
+```
 import { z } from "zod";
 
 export const universalPlatformSchema = z.enum([
@@ -71,7 +71,7 @@ export type ContentEvaluation = z.infer<typeof contentEvaluationSchema>;
 ---
 
 ## lib/mesh/env.ts
-```typescript
+```
 /**
  * Validated environment for the Sovereign Mesh.
  * Import this instead of process.env to get type-safe, runtime-checked config.
@@ -111,7 +111,7 @@ export function getMeshEnv(): MeshEnv {
 ---
 
 ## lib/mesh/youtubeSchema.ts
-```typescript
+```
 import { z } from "zod";
 
 const youtubeThumbnailSchema = z.object({
@@ -151,7 +151,7 @@ export type YoutubeApiVideo = z.infer<typeof youtubeApiVideoSchema>;
 ---
 
 ## lib/db.ts
-```typescript
+```
 import { PrismaClient } from "@prisma/client";
 
 const globalForPrisma = globalThis as unknown as {
@@ -172,7 +172,7 @@ if (process.env.NODE_ENV !== "production") {
 ---
 
 ## lib/mesh/eventStore.ts
-```typescript
+```
 import { randomUUID } from "node:crypto";
 
 import { Prisma } from "@prisma/client";
@@ -330,7 +330,7 @@ export async function heartbeatMeshService(serviceName: string, serviceKind: str
 ---
 
 ## lib/mesh/kafkaClient.ts
-```typescript
+```
 /**
  * KafkaJS singleton for the Sovereign Mesh.
  * The producer is lazy-initialised on first use and reused across calls.
@@ -404,7 +404,7 @@ export async function publishToKafka(
 ---
 
 ## lib/mesh/outboxRelay.ts
-```typescript
+```
 /**
  * Outbox Relay — raw node-postgres read path + KafkaJS publish.
  *
@@ -541,7 +541,7 @@ export async function runOutboxRelay(signal?: AbortSignal): Promise<void> {
 ---
 
 ## lib/mesh/embeddingWorker.ts
-```typescript
+```
 /**
  * Embedding Worker — reads MeshContentItem rows with null embedding and
  * calls the local Ollama /api/embeddings endpoint (Metal-accelerated on M3 Max).
@@ -659,7 +659,7 @@ export async function runEmbeddingWorker(signal?: AbortSignal): Promise<void> {
 ---
 
 ## lib/mesh/dnaStore.ts
-```typescript
+```
 /**
  * DNA Store — persist and retrieve the Creative DNA baseline.
  *
@@ -717,7 +717,7 @@ export async function getDna(): Promise<CreativeDnaRecord | null> {
 ---
 
 ## lib/mesh/vectorSearch.ts
-```typescript
+```
 /**
  * Vector Search — pgvector cosine similarity search over MeshContentItem.
  *
@@ -807,7 +807,7 @@ export async function searchGold(
 ---
 
 ## core/ports/UniversalContentIngestPort.ts
-```typescript
+```
 import type { UniversalContent } from "@/lib/mesh/universalContentSchema";
 
 export interface UniversalContentIngestPort {
@@ -818,7 +818,7 @@ export interface UniversalContentIngestPort {
 ---
 
 ## core/ports/EvaluationJudgePort.ts
-```typescript
+```
 import type { ContentEvaluation, UniversalContent } from "@/lib/mesh/universalContentSchema";
 
 export interface EvaluationJudgePort {
@@ -829,7 +829,7 @@ export interface EvaluationJudgePort {
 ---
 
 ## core/services/UniversalContentIngestService.ts
-```typescript
+```
 import type { UniversalContentIngestPort } from "@/core/ports/UniversalContentIngestPort";
 import { saveUniversalContentWithOutbox } from "@/lib/mesh/eventStore";
 import { universalContentSchema, type UniversalContent } from "@/lib/mesh/universalContentSchema";
@@ -846,7 +846,7 @@ export class UniversalContentIngestService implements UniversalContentIngestPort
 ---
 
 ## core/services/MeshEvaluationService.ts
-```typescript
+```
 import type { EvaluationJudgePort } from "@/core/ports/EvaluationJudgePort";
 import { recordContentEvaluation } from "@/lib/mesh/eventStore";
 import type { UniversalContent } from "@/lib/mesh/universalContentSchema";
@@ -865,7 +865,7 @@ export class MeshEvaluationService {
 ---
 
 ## core/services/mesh/IngestionWorkflow.ts
-```typescript
+```
 /**
  * IngestionWorkflow — proper Temporal workflow definition.
  *
@@ -969,7 +969,7 @@ export async function discoveryIngestionWorkflow(
 ---
 
 ## core/services/mesh/IngestionActivities.ts
-```typescript
+```
 /**
  * IngestionActivities — Temporal activity implementations.
  *
@@ -1185,7 +1185,7 @@ ${transcriptBundle}`;
 ---
 
 ## adapters/intelligence/MeshJudgeAdapter.ts
-```typescript
+```
 import type { EvaluationJudgePort } from "@/core/ports/EvaluationJudgePort";
 import type { ContentEvaluation, UniversalContent } from "@/lib/mesh/universalContentSchema";
 
@@ -1219,7 +1219,7 @@ export class MeshJudgeAdapter implements EvaluationJudgePort {
 ---
 
 ## adapters/intelligence/OllamaGemmaJudgeAdapter.ts
-```typescript
+```
 /**
  * OllamaGemmaJudgeAdapter — real AI evaluation via local Gemma 4.
  *
@@ -1338,7 +1338,7 @@ export class OllamaGemmaJudgeAdapter implements EvaluationJudgePort {
 ---
 
 ## scripts/mesh-youtube-ingest.ts
-```typescript
+```
 import { UniversalContentIngestService } from "@/core/services/UniversalContentIngestService";
 import { youtubeApiListSchema, type YoutubeApiVideo } from "@/lib/mesh/youtubeSchema";
 
@@ -1427,7 +1427,7 @@ main().catch((error) => {
 ---
 
 ## scripts/mesh-outbox-relay.ts
-```typescript
+```
 #!/usr/bin/env tsx
 /**
  * CLI entry point for the Outbox Relay daemon.
@@ -1460,35 +1460,35 @@ runOutboxRelay(controller.signal)
 ---
 
 ## scripts/mesh-embedding-worker.ts
-```typescript
+```
 #!/usr/bin/env tsx
 /**
- * CLI entry point for the Embedding Worker daemon.
- * Run: tsx scripts/mesh-embedding-worker.ts
- * Or:  npm run mesh:embed
+ * Embedding Worker daemon — continuously fills MeshContentItem.embedding
+ * for any row where embedding IS NULL. Runs until SIGTERM/SIGINT.
  *
- * Requires Ollama running locally (http://localhost:11434) with
- * the configured OLLAMA_EMBED_MODEL pulled (default: all-minilm).
- *
- * Pull model: ollama pull all-minilm
+ * Run: npm run mesh:embed
+ * Requires Ollama running locally: ollama pull all-minilm
  */
 import { runEmbeddingWorker } from "@/lib/mesh/embeddingWorker";
 
 const controller = new AbortController();
 
 process.on("SIGTERM", () => {
-  console.log("[embed] SIGTERM — graceful shutdown");
+  console.log("[embed-worker] SIGTERM — graceful shutdown");
   controller.abort();
 });
 process.on("SIGINT", () => {
-  console.log("[embed] SIGINT — graceful shutdown");
+  console.log("[embed-worker] SIGINT — graceful shutdown");
   controller.abort();
 });
+
+console.log("[embed-worker] Starting Sovereign Embedding Worker...");
+console.log("[embed-worker] Polling for unembedded MeshContentItem rows...");
 
 runEmbeddingWorker(controller.signal)
   .then(() => process.exit(0))
   .catch((err) => {
-    console.error("[embed] Fatal:", err);
+    console.error("[embed-worker] Fatal:", err);
     process.exit(1);
   });
 ```
@@ -1496,41 +1496,86 @@ runEmbeddingWorker(controller.signal)
 ---
 
 ## scripts/mesh-discovery-mine.ts
-```typescript
+```
 #!/usr/bin/env tsx
 /**
- * Discovery Mine — triggers the DiscoveryIngestionWorkflow directly
- * (without Temporal, for local use until the Temporal SDK is wired in).
+ * Discovery Mine — standalone runner (no Temporal server required).
+ *
+ * Calls IngestionActivities directly for local development and one-shot runs.
+ * For production durable execution (crash-safe): use mesh:trigger instead,
+ * which sends the workflow to the Temporal server.
  *
  * Run: npm run mesh:discover
- * Env required: YOUTUBE_API_KEY, DATABASE_URL, OLLAMA_HOST (optional)
+ * Env required: DATABASE_URL, YOUTUBE_API_KEY, OLLAMA_HOST (optional)
  */
-import { discoveryIngestionWorkflow } from "@/core/services/mesh/IngestionWorkflow";
+import {
+  fetchYouTubeMetadata,
+  generateEmbeddings,
+  extractCreativeDna,
+} from "@/core/services/mesh/IngestionActivities";
 import { getMeshEnv } from "@/lib/mesh/env";
+
+const CHANNEL_ID = "UCipXVNRvJIBoZt7O_aPIgzg";
+const MIN_VIEWS = 500;
 
 async function main() {
   const env = getMeshEnv();
-  console.log("[discovery-mine] Initializing sovereign discovery run…");
 
-  const result = await discoveryIngestionWorkflow({
-    channelId: "UCipXVNRvJIBoZt7O_aPIgzg",
-    minViewCount: 500,
-    extractDna: true,
-    ollamaModel: env.OLLAMA_EMBED_MODEL ?? "gemma3:27b",
+  if (!env.YOUTUBE_API_KEY) {
+    throw new Error("YOUTUBE_API_KEY is missing from .env");
+  }
+
+  console.log("[discovery-mine] ═══════════════════════════════════════════");
+  console.log("[discovery-mine]  SARAH-MESH-V1 — Sovereign Discovery Mine  ");
+  console.log("[discovery-mine] ═══════════════════════════════════════════");
+  console.log(`[discovery-mine] Channel : ${CHANNEL_ID}`);
+  console.log(`[discovery-mine] Filter  : view_count > ${MIN_VIEWS}`);
+  console.log(`[discovery-mine] Model   : ${env.OLLAMA_EMBED_MODEL} (embed) + gemma3:27b (DNA)`);
+  console.log("");
+
+  // ── Step 1: YouTube Sensory Activation ──────────────────────────────────
+  console.log("[discovery-mine] [1/3] Fetching YouTube metadata...");
+  const { itemCount, ingestedIds } = await fetchYouTubeMetadata({
+    channelId: CHANNEL_ID,
+    minViewCount: MIN_VIEWS,
+    maxResults: 50,
+  });
+  console.log(`[discovery-mine]       ${itemCount} found, ${ingestedIds.length} passed view filter`);
+
+  if (ingestedIds.length === 0) {
+    console.log("[discovery-mine] No qualifying videos found. Exiting.");
+    return;
+  }
+
+  // ── Step 2: Semantic Memory Population ──────────────────────────────────
+  console.log("[discovery-mine] [2/3] Generating pgvector embeddings via Ollama Metal...");
+  const { embeddedCount } = await generateEmbeddings({ contentItemIds: ingestedIds });
+  console.log(`[discovery-mine]       ${embeddedCount}/${ingestedIds.length} items embedded`);
+
+  // ── Step 3: Creative DNA Extraction via Gemma 4 ─────────────────────────
+  const topIds = ingestedIds.slice(0, 10);
+  console.log(`[discovery-mine] [3/3] Extracting Creative DNA from top ${topIds.length} videos via Gemma 4...`);
+  console.log(`[discovery-mine]       (Temp: 0.85, Top-p: 0.95 — high-entropy extraction)`);
+
+  const { dnaPrompt, analyzedCount } = await extractCreativeDna({
+    contentItemIds: topIds,
+    ollamaModel: "gemma3:27b",
   });
 
-  console.log(`[discovery-mine] Done.`);
-  console.log(`  Ingested: ${result.ingestedCount} items`);
-  console.log(`  Embedded: ${result.embeddedCount} items`);
-  if (result.dnaPrompt) {
-    console.log(`\n─── Creative DNA Baseline ───────────────────────────────\n`);
-    console.log(result.dnaPrompt);
-    console.log(`\n────────────────────────────────────────────────────────\n`);
-  }
+  console.log(`[discovery-mine]       Analyzed: ${analyzedCount} transcripts`);
+  console.log("");
+  console.log("[discovery-mine] ─── Creative DNA Baseline ────────────────────────────");
+  console.log(dnaPrompt);
+  console.log("[discovery-mine] ────────────────────────────────────────────────────");
+  console.log("");
+  console.log("[discovery-mine] ✓ Discovery Mine complete.");
+  console.log(`[discovery-mine]   Ingested : ${ingestedIds.length} videos`);
+  console.log(`[discovery-mine]   Embedded : ${embeddedCount} vectors`);
+  console.log(`[discovery-mine]   DNA      : stored → query with mesh/get_dna via MCP`);
 }
 
 main().catch((err) => {
-  console.error("[discovery-mine] Fatal:", err);
+  console.error("[discovery-mine] Fatal:", err instanceof Error ? err.message : err);
   process.exit(1);
 });
 ```
@@ -1538,7 +1583,7 @@ main().catch((err) => {
 ---
 
 ## scripts/mesh-temporal-worker.ts
-```typescript
+```
 #!/usr/bin/env tsx
 /**
  * Temporal Worker — polls the 'sarah-mesh' task queue and executes
@@ -1600,7 +1645,7 @@ main().catch((err) => {
 ---
 
 ## scripts/mesh-trigger-workflow.ts
-```typescript
+```
 #!/usr/bin/env tsx
 /**
  * Trigger a DiscoveryIngestionWorkflow via the Temporal client.
@@ -1669,7 +1714,7 @@ main().catch((err) => {
 ---
 
 ## app/api/mcp/route.ts
-```typescript
+```
 /**
  * MCP Server Hub — JSON-RPC 2.0 over HTTP POST /api/mcp
  *
@@ -1967,7 +2012,7 @@ export async function GET(): Promise<NextResponse> {
 ---
 
 ## core/architecture/meshBoundaries.test.ts
-```typescript
+```
 /**
  * Architecture Fitness Functions — Sovereign Mesh Boundaries
  *
@@ -2216,7 +2261,7 @@ describe("10. Docker Compose Mesh Profile", () => {
 ---
 
 ## prisma/schema.prisma
-```typescript
+```
 generator client {
   provider = "prisma-client-js"
 }
@@ -2544,7 +2589,7 @@ model MeshServiceIdentity {
 ---
 
 ## prisma/migrations/20260402070000_mesh_event_foundation/migration.sql
-```typescript
+```
 -- Mesh event foundation: universal content store, immutable outbox, evaluation records, service identities.
 -- This keeps Postgres as the operational event vault today and a CDC/Kafka handoff point later.
 
@@ -2667,7 +2712,7 @@ ALTER TABLE "mesh_content_evaluation" ADD CONSTRAINT "mesh_content_evaluation_co
 ---
 
 ## docker-compose.yml
-```typescript
+```
 services:
   # ── Postgres 17 + pgvector ────────────────────────────────────────────────
   mesh_db:
@@ -2776,7 +2821,7 @@ volumes:
 ---
 
 ## package.json
-```typescript
+```
 {
   "name": "sovereign-sun-platform",
   "version": "1.3.0",
@@ -2881,7 +2926,7 @@ volumes:
 ---
 
 ## .env.example
-```typescript
+```
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASE_URL=postgresql://postgres:yourpassword@localhost:5432/lead_engine?schema=public
 DATABASE_USER=postgres
