@@ -156,30 +156,57 @@ describe("6. Kafka Client Singleton", () => {
 
 // ── 7. MCP Server Hub ────────────────────────────────────────────────────────
 describe("7. MCP Server Hub", () => {
-  it("implements mcp/manifest and mesh/* tool methods", () => {
+  it("implements mcp/manifest and core mesh/* tool methods", () => {
     const f = read("app/api/mcp/route.ts");
     expect(f).toContain("mcp/manifest");
     expect(f).toContain("mesh/list_content");
     expect(f).toContain("mesh/list_events");
     expect(f).toContain("jsonrpc");
   });
+
+  it("exposes intelligence tools: search_gold, get_dna, trigger_ingest", () => {
+    const f = read("app/api/mcp/route.ts");
+    expect(f).toContain("mesh/search_gold");
+    expect(f).toContain("mesh/get_dna");
+    expect(f).toContain("mesh/trigger_ingest");
+  });
 });
 
-// ── 8. Workflow Contract ──────────────────────────────────────────────────────
+// ── 8. Temporal Workflow Contract ─────────────────────────────────────────────
 describe("8. Temporal Workflow Contract", () => {
-  it("defines discoveryIngestionWorkflow with correct input shape", () => {
+  it("uses proxyActivities — proper Temporal V8 isolate pattern", () => {
     const f = read("core/services/mesh/IngestionWorkflow.ts");
+    expect(f).toContain("proxyActivities");
+    expect(f).toContain("@temporalio/workflow");
     expect(f).toContain("discoveryIngestionWorkflow");
-    expect(f).toContain("DiscoveryIngestionWorkflowInput");
-    expect(f).toContain("minViewCount");
-    expect(f).toContain("extractDna");
+  });
+
+  it("activities are separated into IngestionActivities.ts (I/O boundary)", () => {
+    const f = read("core/services/mesh/IngestionActivities.ts");
+    expect(f).toContain("fetchYouTubeMetadata");
+    expect(f).toContain("generateEmbeddings");
+    expect(f).toContain("extractCreativeDna");
   });
 
   it("DNA extraction calls Ollama with high-entropy settings", () => {
-    const f = read("core/services/mesh/IngestionWorkflow.ts");
-    expect(f).toContain("temperature");
-    expect(f).toContain("top_p");
+    const f = read("core/services/mesh/IngestionActivities.ts");
+    expect(f).toContain("temperature: 0.85");
+    expect(f).toContain("top_p: 0.95");
     expect(f).toContain("/api/generate");
+  });
+
+  it("Gemma judge adapter replaces bootstrap rule engine", () => {
+    const f = read("adapters/intelligence/OllamaGemmaJudgeAdapter.ts");
+    expect(f).toContain("OllamaGemmaJudgeAdapter");
+    expect(f).toContain("/api/generate");
+    expect(f).toContain("gemma3:27b");
+  });
+
+  it("DNA store persists and retrieves creative DNA baseline", () => {
+    const f = read("lib/mesh/dnaStore.ts");
+    expect(f).toContain("saveDna");
+    expect(f).toContain("getDna");
+    expect(f).toContain("sarah.creative.dna");
   });
 });
 
