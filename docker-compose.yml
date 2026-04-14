@@ -1,0 +1,103 @@
+services:
+  # ── Postgres 17 + pgvector ────────────────────────────────────────────────
+  mesh_db:
+    image: pgvector/pgvector:pg17
+    container_name: mesh_db
+    restart: always
+    environment:
+      - POSTGRES_DB=lead_engine
+      - POSTGRES_USER=${DATABASE_USER:-postgres}
+      - POSTGRES_PASSWORD=${DATABASE_PASSWORD:-changeme}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - mesh_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mesh_grid
+
+  # ── Apache Kafka 3.7 — KRaft mode (no Zookeeper) ─────────────────────────
+  # Scaling path: point KAFKA_BROKERS at the H100 cluster brokers — zero code changes.
+  mesh_kafka:
+    profiles: ["mesh"]
+    image: bitnami/kafka:3.7
+    container_name: mesh_kafka
+    restart: unless-stopped
+    environment:
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@mesh_kafka:9093
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://mesh_kafka:9092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_CFG_LOG_RETENTION_HOURS=168
+    ports:
+      - "127.0.0.1:19092:9092"
+    volumes:
+      - mesh_kafka_data:/bitnami/kafka
+    mem_limit: 512m
+    networks:
+      - mesh_grid
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 30s
+
+  # ── Temporal Server (durable workflow orchestration) ──────────────────────
+  # Coinbase / Snap use Temporal for mission-critical reliability.
+  # If Mac restarts mid-workflow, Temporal resumes at the exact line it left off.
+  mesh_temporal:
+    profiles: ["mesh"]
+    image: temporalio/auto-setup:1.24
+    container_name: mesh_temporal
+    restart: unless-stopped
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=${DATABASE_USER:-postgres}
+      - POSTGRES_PWD=${DATABASE_PASSWORD:-changeme}
+      - POSTGRES_SEEDS=mesh_db
+      - TEMPORAL_ADDRESS=mesh_temporal:7233
+      - DYNAMIC_CONFIG_FILE_PATH=/etc/temporal/dynamicconfig/development.yaml
+    ports:
+      - "127.0.0.1:7233:7233"
+    volumes:
+      - ./infra/temporal-dynamicconfig:/etc/temporal/dynamicconfig
+    networks:
+      - mesh_grid
+    depends_on:
+      mesh_db:
+        condition: service_healthy
+    mem_limit: 512m
+
+  mesh_temporal_ui:
+    profiles: ["mesh"]
+    image: temporalio/ui:2.31
+    container_name: mesh_temporal_ui
+    restart: unless-stopped
+    environment:
+      - TEMPORAL_ADDRESS=mesh_temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:8080
+    ports:
+      - "127.0.0.1:8088:8080"
+    networks:
+      - mesh_grid
+    depends_on:
+      - mesh_temporal
+    mem_limit: 128m
+
+networks:
+  mesh_grid:
+    driver: bridge
+
+volumes:
+  mesh_db_data:
+  mesh_kafka_data:

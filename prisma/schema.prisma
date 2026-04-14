@@ -1,0 +1,322 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ContactStatus {
+  PENDING_CONFIRMATION
+  SUBSCRIBED
+  UNSUBSCRIBED
+  SUPPRESSED
+  ERASED
+}
+
+enum SuppressionReason {
+  USER_UNSUBSCRIBED
+  SPAM_COMPLAINT
+  HARD_BOUNCE
+  MANUAL_BLOCK
+  ERASURE_NO_RECONTACT
+}
+
+enum RightsRequestType {
+  ACCESS
+  ERASURE
+  OBJECTION_MARKETING
+  RECTIFICATION
+}
+
+enum RightsRequestStatus {
+  RECEIVED
+  VERIFYING_IDENTITY
+  IN_PROGRESS
+  COMPLETED
+  REJECTED
+}
+
+model Contact {
+  id                String         @id @default(uuid())
+  emailNormalized    String?        @unique @map("email_normalized")
+  emailHash         String         @unique @map("email_hash")
+  status            ContactStatus  @default(PENDING_CONFIRMATION)
+  providerContactId String?        @map("provider_contact_id")
+  
+  consentVersionId  String?        @map("consent_version_id")
+  consentVersion    ConsentVersion? @relation(fields: [consentVersionId], references: [id])
+  
+  formVersionId     String?        @map("form_version_id")
+  formVersion       FormVersion?   @relation(fields: [formVersionId], references: [id])
+  
+  source            String?
+  signupIp          String?        @map("signup_ip")
+  signupUserAgent   String?        @map("signup_user_agent")
+  
+  submittedAt       DateTime?      @map("submitted_at") @db.Timestamptz(3)
+  confirmedAt       DateTime?      @map("confirmed_at") @db.Timestamptz(3)
+  unsubscribedAt    DateTime?      @map("unsubscribed_at") @db.Timestamptz(3)
+  confirmationToken String?        @unique @map("confirmation_token") @db.VarChar(128)
+  erasedAt          DateTime?      @map("erased_at") @db.Timestamptz(3)
+  
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+
+  auditLogs         AuditLog[]
+  rightsRequests    RightsRequest[]
+
+  @@index([emailHash])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model ConsentVersion {
+  id                String    @id @default(uuid())
+  versionCode       String    @unique @map("version_code")
+  consentText       String    @map("consent_text") @db.Text
+  privacyPolicyUrl  String    @map("privacy_policy_url")
+  privacyPolicyVersion String @map("privacy_policy_version")
+  activeFrom        DateTime  @map("active_from") @db.Timestamptz(3)
+  activeTo          DateTime? @map("active_to") @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @map("created_at")
+  
+  contacts          Contact[]
+}
+
+model FormVersion {
+  id                String    @id @default(uuid())
+  versionCode       String    @unique @map("version_code")
+  pageUrl           String    @map("page_url")
+  htmlSnapshotPath  String?   @map("html_snapshot_path")
+  notes             String?   @db.Text
+  activeFrom        DateTime  @map("active_from") @db.Timestamptz(3)
+  activeTo          DateTime? @map("active_to") @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @map("created_at")
+  
+  contacts          Contact[]
+}
+
+model ProviderEvent {
+  id                String    @id @default(uuid())
+  provider          String
+  providerEventId   String?   @unique @map("provider_event_id")
+  eventType         String    @map("event_type")
+  payloadJson       Json      @map("payload_json") @db.JsonB
+  signatureValid    Boolean   @map("signature_valid")
+  receivedAt        DateTime  @default(now()) @map("received_at") @db.Timestamptz(3)
+  processedAt       DateTime? @map("processed_at") @db.Timestamptz(3)
+  processingResult  String?   @map("processing_result") @db.Text
+
+  @@index([provider, eventType])
+  @@index([receivedAt])
+}
+
+model AuditLog {
+  id            String    @id @default(uuid())
+  contactId     String?   @map("contact_id")
+  contact       Contact?  @relation(fields: [contactId], references: [id])
+  emailHash     String?   @map("email_hash")
+  eventType     String    @map("event_type")
+  eventSource   String    @map("event_source")
+  requestId     String?   @map("request_id")
+  metadata      Json?     @db.JsonB
+  occurredAt    DateTime  @default(now()) @map("occurred_at") @db.Timestamptz(3)
+
+  @@index([emailHash])
+  @@index([occurredAt])
+}
+
+model RightsRequest {
+  id                String             @id @default(uuid())
+  contactId         String?            @map("contact_id")
+  contact           Contact?           @relation(fields: [contactId], references: [id])
+  emailNormalized    String?            @map("email_normalized")
+  requestType       RightsRequestType  @map("request_type")
+  status            RightsRequestStatus @default(RECEIVED)
+  requestedAt       DateTime           @default(now()) @map("requested_at") @db.Timestamptz(3)
+  completedAt       DateTime?          @map("completed_at") @db.Timestamptz(3)
+  notes             String?            @db.Text
+
+  @@index([contactId])
+  @@index([requestedAt])
+}
+
+model Suppression {
+  id                String            @id @default(uuid())
+  emailNormalized    String?           @map("email_normalized")
+  emailHash         String            @unique @map("email_hash")
+  reason            SuppressionReason
+  source            String?
+  createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+}
+
+model SqueezePageAnalytics {
+  id          String   @id @default(cuid())
+  pageSlug    String   @unique
+  views       Int      @default(0)
+  conversions Int      @default(0)
+  lastEntryAt DateTime @default(now())
+}
+
+// ----------------------------
+// Intelligence Machine Foundation
+// ----------------------------
+
+enum PlatformEnum {
+  TIKTOK
+  YOUTUBE
+  PERPLEXITY
+  GOOGLE
+  REDDIT
+  INSTAGRAM
+  FACEBOOK
+  X
+}
+
+enum MeshEventStatus {
+  PENDING
+  PROCESSING
+  PUBLISHED
+  FAILED
+}
+
+model Observation_Signal {
+  @@map("intelligence_layer_observation_signal")
+  @@index([platform])
+  @@index([ecosystem_id])
+
+  id                 BigInt            @id @default(autoincrement())
+  persona_id         Int
+  platform           PlatformEnum
+  content_transcript String           @db.Text
+  metadata           Json             @db.JsonB
+  vibe_coordinates   Unsupported("vector(1536)")?
+  ecosystem_id       String?
+  ecosystem          Ecosystem?       @relation(fields: [ecosystem_id], references: [id], onDelete: SetNull)
+}
+
+model Agent_Soul {
+  @@map("intelligence_layer_agent_soul")
+
+  id             Int     @id @default(autoincrement())
+  name           String
+  psych_profile Json    @db.JsonB
+  is_active      Boolean @default(true)
+}
+
+model Ecosystem {
+  @@map("intelligence_layer_ecosystem")
+  @@index([funnel_dna], type: Gin)
+  @@index([intelligence_log], type: Gin)
+  @@index([platform, is_dream_200])
+
+  id               String               @id @default(uuid())
+  handle           String               @unique
+  platform         PlatformEnum
+  url              String
+  follower_count   Int?
+  funnel_dna       Json?                @db.JsonB
+  signals          Observation_Signal[]
+  is_dream_200     Boolean              @default(false)
+  intelligence_log Json?                @db.JsonB
+  last_scouted_at  DateTime?            @db.Timestamptz(3)
+}
+
+model Swarm_Agent {
+  @@map("intelligence_layer_swarm_agent")
+  @@index([agent_soul_id])
+
+  id           String  @id @default(uuid())
+  persona_name String
+  agent_soul_id String
+  email        String? @unique
+  proxy_config Json?   @db.JsonB
+  interactions Int     @default(0)
+}
+
+model MeshContentItem {
+  @@map("mesh_content_item")
+  @@unique([sourcePlatform, externalId])
+  @@index([sourcePlatform, publishedAt])
+  @@index([sourceChannelId])
+
+  id              String                  @id @default(uuid())
+  sourcePlatform  String                  @map("source_platform")
+  externalId      String                  @map("external_id")
+  sourceChannelId String?                 @map("source_channel_id")
+  canonicalUrl    String                  @map("canonical_url")
+  title           String
+  description     String?                 @db.Text
+  contentText     String                  @map("content_text") @db.Text
+  transcriptText  String?                 @map("transcript_text") @db.Text
+  languageCode    String?                 @map("language_code")
+  schemaVersion   String                  @default("universal-content.v1") @map("schema_version")
+  viewCount       Int?                    @map("view_count")
+  likeCount       Int?                    @map("like_count")
+  commentCount    Int?                    @map("comment_count")
+  publishedAt     DateTime?               @map("published_at") @db.Timestamptz(3)
+  discoveredAt    DateTime                @default(now()) @map("discovered_at") @db.Timestamptz(3)
+  rawPayload      Json                    @map("raw_payload") @db.JsonB
+  embedding       Unsupported("vector(1536)")?
+  createdAt       DateTime                @default(now()) @map("created_at")
+  updatedAt       DateTime                @updatedAt @map("updated_at")
+  evaluations     MeshContentEvaluation[]
+}
+
+model MeshEventOutbox {
+  @@map("mesh_event_outbox")
+  @@index([status, availableAt])
+  @@index([aggregateType, aggregateId])
+  @@index([eventType, createdAt])
+
+  id            String          @id @default(uuid())
+  aggregateType String          @map("aggregate_type")
+  aggregateId   String          @map("aggregate_id")
+  eventType     String          @map("event_type")
+  eventKey      String          @unique @map("event_key")
+  eventVersion  Int             @default(1) @map("event_version")
+  producer      String
+  status        MeshEventStatus @default(PENDING)
+  payloadJson   Json            @map("payload_json") @db.JsonB
+  headersJson   Json?           @map("headers_json") @db.JsonB
+  attempts      Int             @default(0)
+  availableAt   DateTime        @default(now()) @map("available_at") @db.Timestamptz(3)
+  publishedAt   DateTime?       @map("published_at") @db.Timestamptz(3)
+  lastError     String?         @map("last_error") @db.Text
+  createdAt     DateTime        @default(now()) @map("created_at")
+}
+
+model MeshContentEvaluation {
+  @@map("mesh_content_evaluation")
+  @@index([contentItemId, createdAt])
+  @@index([verdict])
+
+  id              String          @id @default(uuid())
+  contentItemId   String          @map("content_item_id")
+  contentItem     MeshContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  evaluatorKind   String          @map("evaluator_kind")
+  modelName       String?         @map("model_name")
+  verdict         String
+  qualityScore    Float?          @map("quality_score")
+  contrarianScore Float?          @map("contrarian_score")
+  nuanceScore     Float?          @map("nuance_score")
+  notes           String?         @db.Text
+  payloadJson     Json?           @map("payload_json") @db.JsonB
+  createdAt       DateTime        @default(now()) @map("created_at")
+}
+
+model MeshServiceIdentity {
+  @@map("mesh_service_identity")
+
+  id              String    @id @default(uuid())
+  serviceName     String    @unique @map("service_name")
+  serviceKind     String    @map("service_kind")
+  version         String
+  protocol        String
+  metadataJson    Json?     @map("metadata_json") @db.JsonB
+  lastHeartbeatAt DateTime? @map("last_heartbeat_at") @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+}

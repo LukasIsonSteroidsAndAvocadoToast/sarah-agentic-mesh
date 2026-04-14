@@ -1,0 +1,32 @@
+{
+  "name": "sarah-agentic-mesh",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SARAH-MESH-V1 — Sovereign Intelligence Mesh. Event-sourced content engine with Kafka KRaft, Temporal, pgvector, MCP Hub.",
+  "scripts": {
+    "mesh:discover":       "tsx scripts/mesh-discovery-mine.ts",
+    "mesh:relay":          "tsx scripts/mesh-outbox-relay.ts",
+    "mesh:embed":          "tsx scripts/mesh-embedding-worker.ts",
+    "mesh:youtube:ingest": "tsx scripts/mesh-youtube-ingest.ts",
+    "mesh:up":             "docker compose --profile mesh up -d",
+    "mesh:down":           "docker compose --profile mesh down",
+    "test:architecture":   "vitest run core/architecture/**/*.test.ts",
+    "test":                "vitest run",
+    "typecheck":           "tsc --noEmit"
+  },
+  "dependencies": {
+    "@prisma/client": "6.1.0",
+    "kafkajs": "^2.2.4",
+    "pg": "^8.13.3",
+    "server-only": "^0.0.1",
+    "zod": "3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/pg": "^8.11.11",
+    "prisma": "6.1.0",
+    "tsx": "4.19.2",
+    "typescript": "5.7.2",
+    "vitest": "3.0.5"
+  }
+}
