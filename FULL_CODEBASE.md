@@ -1,6 +1,7 @@
-# SARAH-MESH-V1 — Full Codebase Dump
+# SARAH-MESH-V1 — Full Codebase Dump (Intelligence Ignition Build)
 > Every source file in this repository, concatenated for LLM ingestion.
-> Architecture: Hexagonal (Ports/Adapters). Event-sourced. Kafka KRaft. Temporal. pgvector. MCP Hub. YouTube → Gemma 4 DNA.
+> Architecture: Hexagonal. Event-sourced. Kafka KRaft. Temporal SDK. pgvector. MCP Hub v2. Gemma 4 DNA.
+
 
 ---
 
@@ -657,6 +658,154 @@ export async function runEmbeddingWorker(signal?: AbortSignal): Promise<void> {
 
 ---
 
+## lib/mesh/dnaStore.ts
+```typescript
+/**
+ * DNA Store — persist and retrieve the Creative DNA baseline.
+ *
+ * Uses the existing MeshServiceIdentity table with a sentinel record
+ * (serviceName = 'sarah.creative.dna') so no new migration is needed.
+ * The dnaPrompt, analyzedCount, and run metadata live in metadataJson.
+ */
+import { randomUUID } from "node:crypto";
+import { Prisma } from "@prisma/client";
+import { prisma } from "@/lib/db";
+
+function toJson(value: unknown): Prisma.InputJsonValue {
+  return value as Prisma.InputJsonValue;
+}
+
+const DNA_SERVICE_NAME = "sarah.creative.dna";
+
+export interface CreativeDnaRecord {
+  dnaPrompt: string;
+  analyzedCount: number;
+  channelId: string;
+  ollamaModel: string;
+  extractedAt: string;
+}
+
+export async function saveDna(record: CreativeDnaRecord): Promise<void> {
+  await prisma.meshServiceIdentity.upsert({
+    where: { serviceName: DNA_SERVICE_NAME },
+    create: {
+      id: randomUUID(),
+      serviceName: DNA_SERVICE_NAME,
+      serviceKind: "intelligence.dna",
+      version: "1",
+      protocol: "ollama",
+      lastHeartbeatAt: new Date(),
+      metadataJson: toJson(record),
+    },
+    update: {
+      version: String(Date.now()),
+      lastHeartbeatAt: new Date(),
+      metadataJson: toJson(record),
+    },
+  });
+}
+
+export async function getDna(): Promise<CreativeDnaRecord | null> {
+  const record = await prisma.meshServiceIdentity.findUnique({
+    where: { serviceName: DNA_SERVICE_NAME },
+  });
+  if (!record?.metadataJson) return null;
+  return record.metadataJson as unknown as CreativeDnaRecord;
+}
+```
+
+---
+
+## lib/mesh/vectorSearch.ts
+```typescript
+/**
+ * Vector Search — pgvector cosine similarity search over MeshContentItem.
+ *
+ * Uses raw pg (<=> operator) because Prisma does not yet support vector operators.
+ * Generates the query embedding via Ollama Metal before searching.
+ *
+ * Cosine distance: 0 = identical, 2 = opposite. We return similarity = 1 - distance.
+ */
+import { Pool } from "pg";
+import { getMeshEnv } from "@/lib/mesh/env";
+
+interface SearchResult {
+  id: string;
+  title: string;
+  canonicalUrl: string;
+  sourcePlatform: string;
+  viewCount: number | null;
+  publishedAt: Date | null;
+  similarity: number;
+  snippet: string;
+}
+
+let _pool: Pool | null = null;
+
+function getPool(): Pool {
+  if (!_pool) {
+    _pool = new Pool({ connectionString: getMeshEnv().DATABASE_URL, max: 3 });
+  }
+  return _pool;
+}
+
+async function embedQuery(query: string): Promise<number[]> {
+  const env = getMeshEnv();
+  const res = await fetch(`${env.OLLAMA_HOST}/api/embeddings`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: env.OLLAMA_EMBED_MODEL, prompt: query }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`Ollama embed ${res.status}`);
+  const { embedding } = (await res.json()) as { embedding: number[] };
+  return embedding;
+}
+
+export async function searchGold(
+  query: string,
+  limit = 5,
+): Promise<SearchResult[]> {
+  const embedding = await embedQuery(query);
+  const vecLiteral = `[${embedding.join(",")}]`;
+  const pool = getPool();
+
+  const { rows } = await pool.query<{
+    id: string;
+    title: string;
+    canonical_url: string;
+    source_platform: string;
+    view_count: number | null;
+    published_at: Date | null;
+    content_text: string;
+    distance: number;
+  }>(
+    `SELECT
+       id, title, canonical_url, source_platform, view_count, published_at,
+       LEFT(content_text, 300) AS content_text,
+       (embedding <=> $1::vector) AS distance
+     FROM "MeshContentItem"
+     WHERE embedding IS NOT NULL
+     ORDER BY embedding <=> $1::vector
+     LIMIT $2`,
+    [vecLiteral, limit],
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    canonicalUrl: r.canonical_url,
+    sourcePlatform: r.source_platform,
+    viewCount: r.view_count,
+    publishedAt: r.published_at,
+    similarity: Number((1 - r.distance).toFixed(4)),
+    snippet: r.content_text,
+  }));
+}
+```
+
+---
+
 ## core/ports/UniversalContentIngestPort.ts
 ```typescript
 import type { UniversalContent } from "@/lib/mesh/universalContentSchema";
@@ -718,21 +867,21 @@ export class MeshEvaluationService {
 ## core/services/mesh/IngestionWorkflow.ts
 ```typescript
 /**
- * IngestionWorkflow — Temporal-ready workflow definition.
+ * IngestionWorkflow — proper Temporal workflow definition.
  *
- * Temporal SDK note: The @temporalio/* packages require native Rust compilation
- * via @temporalio/core-bridge.  They are declared as OPTIONAL peer dependencies
- * here to keep CI green without the native build toolchain.
+ * This file runs inside Temporal's V8 isolate — NO Node.js I/O here.
+ * All I/O is delegated to activities (IngestionActivities.ts) via proxyActivities.
  *
- * To activate:
- *   npm install @temporalio/client @temporalio/worker @temporalio/workflow @temporalio/activity
- *   Then replace the stub implementations below with real Temporal decorators.
+ * Temporal guarantees: if the Mac dies mid-workflow, Temporal replays the
+ * history and resumes at the exact activity it left off. No data loss.
  *
- * The interfaces and activity signatures defined here are the stable contract —
- * zero business logic needs to change when the real SDK is wired in.
+ * Wire the worker: scripts/mesh-temporal-worker.ts
+ * Start a workflow: scripts/mesh-trigger-workflow.ts
  */
+import { proxyActivities } from "@temporalio/workflow";
+import type * as Activities from "@/core/services/mesh/IngestionActivities";
 
-// ── Activity inputs / outputs (stable interface contract) ─────────────────────
+// ── Type contracts (shared between workflow + activities) ──────────────────────
 
 export interface FetchYouTubeMetadataInput {
   channelId: string;
@@ -763,8 +912,6 @@ export interface ExtractCreativeDnaOutput {
   analyzedCount: number;
 }
 
-// ── Workflow definition (stub — replace with @temporalio/workflow decorators) ──
-
 export interface DiscoveryIngestionWorkflowInput {
   channelId: string;
   minViewCount: number;
@@ -778,70 +925,111 @@ export interface DiscoveryIngestionWorkflowOutput {
   dnaPrompt?: string;
 }
 
-/**
- * Stub workflow that can be swapped for a real Temporal workflow.
- * When using the Temporal SDK, annotate with @workflow.defn and replace
- * executeActivity calls with the proper Temporal activity proxies.
- */
+// ── Activity proxies (Temporal injects the real implementations) ───────────────
+const { fetchYouTubeMetadata, generateEmbeddings, extractCreativeDna } =
+  proxyActivities<typeof Activities>({
+    startToCloseTimeout: "10 minutes",
+    retry: {
+      maximumAttempts: 3,
+      initialInterval: "5s",
+      backoffCoefficient: 2,
+    },
+  });
+
+// ── Workflow definition ────────────────────────────────────────────────────────
 export async function discoveryIngestionWorkflow(
   input: DiscoveryIngestionWorkflowInput,
 ): Promise<DiscoveryIngestionWorkflowOutput> {
   const { channelId, minViewCount, extractDna, ollamaModel = "gemma3:27b" } = input;
 
-  // Step 1 — ingest YouTube metadata into the outbox
-  const { ingestedIds } = await activityFetchYouTubeMetadata({
+  // Step 1 — Fetch YouTube metadata + write to Postgres outbox (idempotent upserts).
+  const { ingestedIds } = await fetchYouTubeMetadata({
     channelId,
     minViewCount,
     maxResults: 50,
   });
 
-  // Step 2 — generate semantic embeddings for newly ingested items
-  const { embeddedCount } = await activityGenerateEmbeddings({
+  // Step 2 — Generate semantic embeddings for newly ingested items.
+  const { embeddedCount } = await generateEmbeddings({
     contentItemIds: ingestedIds,
   });
 
-  // Step 3 (optional) — extract creative DNA from top performers
+  // Step 3 (opt-in) — Extract Creative DNA from top performers via Gemma 4.
   let dnaPrompt: string | undefined;
   if (extractDna && ingestedIds.length > 0) {
     const topIds = ingestedIds.slice(0, 10);
-    const result = await activityExtractCreativeDna({
-      contentItemIds: topIds,
-      ollamaModel,
-    });
+    const result = await extractCreativeDna({ contentItemIds: topIds, ollamaModel });
     dnaPrompt = result.dnaPrompt;
   }
 
   return { ingestedCount: ingestedIds.length, embeddedCount, dnaPrompt };
 }
+```
 
-// ── Activity stubs (real implementations live in adapters/) ──────────────────
+---
 
-async function activityFetchYouTubeMetadata(
+## core/services/mesh/IngestionActivities.ts
+```typescript
+/**
+ * IngestionActivities — Temporal activity implementations.
+ *
+ * Activities run in normal Node.js context (full I/O access).
+ * Each exported function maps 1:1 to an activity proxy in IngestionWorkflow.ts.
+ *
+ * Temporal guarantees: if the worker crashes mid-activity, Temporal retries
+ * from the start of that activity (idempotent design required).
+ * The outbox pattern + upsert semantics make all writes idempotent.
+ */
+import { Pool } from "pg";
+import { UniversalContentIngestService } from "@/core/services/UniversalContentIngestService";
+import { youtubeApiListSchema } from "@/lib/mesh/youtubeSchema";
+import { getMeshEnv } from "@/lib/mesh/env";
+import { saveDna } from "@/lib/mesh/dnaStore";
+import type {
+  FetchYouTubeMetadataInput,
+  FetchYouTubeMetadataOutput,
+  GenerateEmbeddingsInput,
+  GenerateEmbeddingsOutput,
+  ExtractCreativeDnaInput,
+  ExtractCreativeDnaOutput,
+} from "@/core/services/mesh/IngestionWorkflow";
+
+// ── Activity: Fetch YouTube metadata + ingest into outbox ─────────────────────
+export async function fetchYouTubeMetadata(
   input: FetchYouTubeMetadataInput,
 ): Promise<FetchYouTubeMetadataOutput> {
-  // Dynamically imported so the worker can be tree-shaken from the Next.js bundle.
-  const { UniversalContentIngestService } = await import(
-    "@/core/services/UniversalContentIngestService"
-  );
-  const { youtubeApiListSchema } = await import("@/lib/mesh/youtubeSchema");
-  const { getMeshEnv } = await import("@/lib/mesh/env");
-
   const env = getMeshEnv();
   if (!env.YOUTUBE_API_KEY) throw new Error("YOUTUBE_API_KEY is not set");
 
-  const url = new URL("https://www.googleapis.com/youtube/v3/search");
-  url.searchParams.set("part", "snippet");
-  url.searchParams.set("channelId", input.channelId);
-  url.searchParams.set("maxResults", String(input.maxResults ?? 50));
-  url.searchParams.set("order", "viewCount");
-  url.searchParams.set("type", "video");
-  url.searchParams.set("key", env.YOUTUBE_API_KEY);
+  const searchUrl = new URL("https://www.googleapis.com/youtube/v3/search");
+  searchUrl.searchParams.set("part", "snippet");
+  searchUrl.searchParams.set("channelId", input.channelId);
+  searchUrl.searchParams.set("maxResults", String(input.maxResults ?? 50));
+  searchUrl.searchParams.set("order", "viewCount");
+  searchUrl.searchParams.set("type", "video");
+  searchUrl.searchParams.set("key", env.YOUTUBE_API_KEY);
 
-  const res = await fetch(url.toString());
-  if (!res.ok) throw new Error(`YouTube API ${res.status}`);
-  const raw = await res.json();
-  const list = youtubeApiListSchema.parse(raw);
+  const searchRes = await fetch(searchUrl.toString());
+  if (!searchRes.ok) throw new Error(`YouTube search ${searchRes.status}`);
 
+  const searchJson = (await searchRes.json()) as {
+    items?: Array<{ id?: { videoId?: string } }>;
+  };
+  const videoIds = (searchJson.items ?? [])
+    .map((i) => i.id?.videoId)
+    .filter(Boolean) as string[];
+
+  if (videoIds.length === 0) return { itemCount: 0, ingestedIds: [] };
+
+  const videosUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
+  videosUrl.searchParams.set("part", "snippet,statistics,contentDetails");
+  videosUrl.searchParams.set("id", videoIds.join(","));
+  videosUrl.searchParams.set("key", env.YOUTUBE_API_KEY);
+
+  const videosRes = await fetch(videosUrl.toString());
+  if (!videosRes.ok) throw new Error(`YouTube videos ${videosRes.status}`);
+
+  const list = youtubeApiListSchema.parse(await videosRes.json());
   const service = new UniversalContentIngestService();
   const ingestedIds: string[] = [];
 
@@ -857,11 +1045,14 @@ async function activityFetchYouTubeMetadata(
       canonicalUrl: `https://www.youtube.com/watch?v=${item.id}`,
       title: item.snippet.title,
       description: item.snippet.description,
-      contentText: "",
+      contentText: [item.snippet.title, item.snippet.description].filter(Boolean).join("\n\n"),
       viewCount,
+      likeCount: item.statistics?.likeCount ? parseInt(item.statistics.likeCount, 10) : undefined,
+      commentCount: item.statistics?.commentCount ? parseInt(item.statistics.commentCount, 10) : undefined,
+      languageCode: item.snippet.defaultLanguage,
       publishedAt: item.snippet.publishedAt,
       discoveredAt: new Date().toISOString(),
-      rawPayload: item,
+      rawPayload: item as unknown as Record<string, unknown>,
     });
     ingestedIds.push(item.id);
   }
@@ -869,101 +1060,125 @@ async function activityFetchYouTubeMetadata(
   return { itemCount: list.items.length, ingestedIds };
 }
 
-async function activityGenerateEmbeddings(
+// ── Activity: Generate pgvector embeddings via Ollama Metal ───────────────────
+export async function generateEmbeddings(
   input: GenerateEmbeddingsInput,
 ): Promise<GenerateEmbeddingsOutput> {
-  // Delegate to the embedding worker's single-batch function.
-  // Full workers run as separate processes (scripts/mesh-embedding-worker.ts).
-  const { Pool } = await import("pg");
-  const { getMeshEnv } = await import("@/lib/mesh/env");
-
   const env = getMeshEnv();
   const pool = new Pool({ connectionString: env.DATABASE_URL, max: 2 });
   let embeddedCount = 0;
 
-  for (const id of input.contentItemIds) {
-    try {
-      const { rows } = await pool.query(
-        `SELECT title, description, transcript_text, content_text FROM "MeshContentItem" WHERE id = $1`,
-        [id],
+  try {
+    for (const externalId of input.contentItemIds) {
+      const { rows } = await pool.query<{
+        id: string;
+        title: string;
+        description: string | null;
+        transcript_text: string | null;
+        content_text: string;
+      }>(
+        `SELECT id, title, description, transcript_text, content_text
+         FROM "MeshContentItem" WHERE external_id = $1`,
+        [externalId],
       );
       if (!rows[0]) continue;
 
-      const text = [rows[0].title, rows[0].description, rows[0].transcript_text ?? rows[0].content_text]
+      const r = rows[0];
+      const text = [r.title, r.description, r.transcript_text ?? r.content_text]
         .filter(Boolean)
         .join("\n\n")
         .slice(0, 8_192);
 
       if (!text.trim()) continue;
 
-      const res = await fetch(`${env.OLLAMA_HOST}/api/embeddings`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: env.OLLAMA_EMBED_MODEL, prompt: text }),
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!res.ok) continue;
-      const { embedding } = (await res.json()) as { embedding: number[] };
-      const vecLit = `[${embedding.join(",")}]`;
-      await pool.query(`UPDATE "MeshContentItem" SET embedding = $1::vector WHERE id = $2`, [vecLit, id]);
-      embeddedCount++;
-    } catch {
-      // Best-effort per item; will be retried by the embedding worker on next cycle.
+      try {
+        const res = await fetch(`${env.OLLAMA_HOST}/api/embeddings`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model: env.OLLAMA_EMBED_MODEL, prompt: text }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!res.ok) continue;
+
+        const { embedding } = (await res.json()) as { embedding: number[] };
+        await pool.query(
+          `UPDATE "MeshContentItem" SET embedding = $1::vector WHERE id = $2`,
+          [`[${embedding.join(",")}]`, r.id],
+        );
+        embeddedCount++;
+      } catch {
+        // Best-effort per item — embedding worker will catch stragglers.
+      }
     }
+  } finally {
+    await pool.end();
   }
 
-  await pool.end();
   return { embeddedCount };
 }
 
-async function activityExtractCreativeDna(
+// ── Activity: Extract Creative DNA via Gemma 4 + persist ─────────────────────
+export async function extractCreativeDna(
   input: ExtractCreativeDnaInput,
 ): Promise<ExtractCreativeDnaOutput> {
-  const { Pool } = await import("pg");
-  const { getMeshEnv } = await import("@/lib/mesh/env");
-
   const env = getMeshEnv();
   const pool = new Pool({ connectionString: env.DATABASE_URL, max: 2 });
 
-  const { rows } = await pool.query(
-    `SELECT title, description, transcript_text
-     FROM "MeshContentItem"
-     WHERE id = ANY($1::uuid[])
-     ORDER BY view_count DESC`,
-    [input.contentItemIds],
-  );
-  await pool.end();
+  let rows: Array<{ title: string; description: string | null; transcript_text: string | null; view_count: number | null }> = [];
+  try {
+    const res = await pool.query(
+      `SELECT title, description, transcript_text, view_count
+       FROM "MeshContentItem"
+       WHERE external_id = ANY($1::text[])
+       ORDER BY view_count DESC NULLS LAST`,
+      [input.contentItemIds],
+    );
+    rows = res.rows;
+  } finally {
+    await pool.end();
+  }
 
   const transcriptBundle = rows
-    .map((r, i) => `### Video ${i + 1}: ${r.title}\n${r.transcript_text ?? r.description ?? ""}`)
+    .map(
+      (r, i) =>
+        `### Video ${i + 1}: ${r.title} (${r.view_count ?? 0} views)\n${r.transcript_text ?? r.description ?? "(no transcript)"}`,
+    )
     .join("\n\n---\n\n")
     .slice(0, 32_000);
 
-  const systemPrompt = `You are a creative DNA analyst. Do not apply external personas.`;
-  const userPrompt = `Analyze these transcripts. Extract the native creative patterns.
-How does this human think outside the box? What makes the language feel human?
-Define the 'Sarah DNA' from this proven data. Return a concise system-prompt
-baseline (≤400 words) that captures the authentic voice.
+  const userPrompt = `Analyze these transcripts. Identify the core creative patterns, high-leverage hooks, and contrarian insights.
+Do not use jargon. Do not impose an external persona. Speak from the data.
+Summarize the 'Native Creative DNA' that drives this engagement in ≤400 words.
+Format: a system-prompt-ready paragraph that captures the authentic voice, thinking style, and what makes this content resonate.
 
 ${transcriptBundle}`;
 
-  const res = await fetch(`${env.OLLAMA_HOST}/api/generate`, {
+  const ollamaRes = await fetch(`${env.OLLAMA_HOST}/api/generate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       model: input.ollamaModel,
-      system: systemPrompt,
+      system: "You are a creative DNA analyst. Extract patterns from proven content. No hallucinations, only data.",
       prompt: userPrompt,
       stream: false,
       options: { temperature: 0.85, top_p: 0.95, top_k: 60 },
     }),
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(180_000),
   });
 
-  if (!res.ok) throw new Error(`Ollama generate error ${res.status}`);
-  const { response } = (await res.json()) as { response: string };
+  if (!ollamaRes.ok) throw new Error(`Ollama generate ${ollamaRes.status}`);
+  const { response } = (await ollamaRes.json()) as { response: string };
+  const dnaPrompt = response.trim();
 
-  return { dnaPrompt: response.trim(), analyzedCount: rows.length };
+  await saveDna({
+    dnaPrompt,
+    analyzedCount: rows.length,
+    channelId: input.contentItemIds[0] ?? "unknown",
+    ollamaModel: input.ollamaModel,
+    extractedAt: new Date().toISOString(),
+  });
+
+  return { dnaPrompt, analyzedCount: rows.length };
 }
 ```
 
@@ -996,6 +1211,125 @@ export class MeshJudgeAdapter implements EvaluationJudgePort {
         character_count: text.length,
         view_count: content.viewCount ?? 0,
       },
+    };
+  }
+}
+```
+
+---
+
+## adapters/intelligence/OllamaGemmaJudgeAdapter.ts
+```typescript
+/**
+ * OllamaGemmaJudgeAdapter — real AI evaluation via local Gemma 4.
+ *
+ * Replaces the bootstrap rule engine. Calls Ollama /api/generate and
+ * asks Gemma to return a structured JSON verdict on content quality,
+ * contrarian angle, and nuance score.
+ *
+ * Fallback: if Ollama is unreachable or returns malformed JSON, the adapter
+ * degrades gracefully to a deterministic score rather than crashing.
+ */
+import type { EvaluationJudgePort } from "@/core/ports/EvaluationJudgePort";
+import type { ContentEvaluation, UniversalContent } from "@/lib/mesh/universalContentSchema";
+import { getMeshEnv } from "@/lib/mesh/env";
+
+interface GemmaVerdict {
+  verdict: "ACCEPT" | "REVIEW" | "REJECT";
+  quality_score: number;
+  contrarian_score: number;
+  nuance_score: number;
+  notes: string;
+}
+
+const JUDGE_SYSTEM_PROMPT = `You are a content intelligence evaluator. Your task is to analyze a piece of content and return a JSON object with exactly these fields:
+{
+  "verdict": "ACCEPT" | "REVIEW" | "REJECT",
+  "quality_score": 0.0-1.0,
+  "contrarian_score": 0.0-1.0,
+  "nuance_score": 0.0-1.0,
+  "notes": "one sentence explaining the verdict"
+}
+
+Scoring guide:
+- quality_score: How well-written, clear, and valuable is this for an audience?
+- contrarian_score: How much does this challenge conventional thinking or offer a unique angle?
+- nuance_score: How much complexity, subtlety, or layered insight does this contain?
+- verdict: ACCEPT if quality_score > 0.55, REJECT if < 0.25, otherwise REVIEW.
+
+Return ONLY the JSON object. No markdown, no explanation, no preamble.`;
+
+function buildJudgePrompt(content: UniversalContent): string {
+  const text = [content.title, content.description, content.contentText, content.transcriptText]
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, 6_000);
+
+  return `Platform: ${content.sourcePlatform}
+Views: ${content.viewCount ?? 0}
+Title: ${content.title}
+
+Content:
+${text}`;
+}
+
+function fallbackScore(content: UniversalContent): GemmaVerdict {
+  const text = `${content.title} ${content.description ?? ""} ${content.contentText}`;
+  const richness = Math.min(text.length / 4_000, 1);
+  const engagement = Math.min((content.viewCount ?? 0) / 10_000, 1);
+  const q = Number((0.45 + richness * 0.35 + engagement * 0.2).toFixed(3));
+  return {
+    verdict: q > 0.55 ? "ACCEPT" : q < 0.25 ? "REJECT" : "REVIEW",
+    quality_score: q,
+    contrarian_score: Number((Math.min(text.split("?").length / 10, 1) * 0.4).toFixed(3)),
+    nuance_score: Number((Math.min(text.split(".").length / 25, 1) * 0.6).toFixed(3)),
+    notes: "Fallback rule-engine (Ollama unreachable).",
+  };
+}
+
+export class OllamaGemmaJudgeAdapter implements EvaluationJudgePort {
+  async evaluate(content: UniversalContent): Promise<ContentEvaluation> {
+    const env = getMeshEnv();
+
+    let verdict: GemmaVerdict;
+
+    try {
+      const res = await fetch(`${env.OLLAMA_HOST}/api/generate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gemma3:27b",
+          system: JUDGE_SYSTEM_PROMPT,
+          prompt: buildJudgePrompt(content),
+          stream: false,
+          format: "json",
+          options: { temperature: 0.3, top_p: 0.9 },
+        }),
+        signal: AbortSignal.timeout(45_000),
+      });
+
+      if (!res.ok) throw new Error(`Ollama ${res.status}`);
+
+      const raw = (await res.json()) as { response: string };
+      verdict = JSON.parse(raw.response.trim()) as GemmaVerdict;
+
+      if (!["ACCEPT", "REVIEW", "REJECT"].includes(verdict.verdict)) {
+        throw new Error("Invalid verdict field");
+      }
+    } catch (err) {
+      console.warn("[gemma-judge] Falling back to rule engine:", (err as Error).message);
+      verdict = fallbackScore(content);
+    }
+
+    return {
+      evaluatorKind: "AI_JUDGE",
+      modelName: "gemma3:27b",
+      verdict: verdict.verdict,
+      qualityScore: Math.max(0, Math.min(1, verdict.quality_score)),
+      contrarianScore: Math.max(0, Math.min(1, verdict.contrarian_score)),
+      nuanceScore: Math.max(0, Math.min(1, verdict.nuance_score)),
+      notes: verdict.notes,
+      payload: { source_platform: content.sourcePlatform, view_count: content.viewCount ?? 0 },
     };
   }
 }
@@ -1203,28 +1537,166 @@ main().catch((err) => {
 
 ---
 
+## scripts/mesh-temporal-worker.ts
+```typescript
+#!/usr/bin/env tsx
+/**
+ * Temporal Worker — polls the 'sarah-mesh' task queue and executes
+ * DiscoveryIngestionWorkflow activities.
+ *
+ * Run: npm run mesh:worker
+ * Requires: Temporal server running (npm run mesh:up first)
+ *
+ * The worker registers:
+ *   - Workflow:   discoveryIngestionWorkflow (IngestionWorkflow.ts)
+ *   - Activities: fetchYouTubeMetadata, generateEmbeddings, extractCreativeDna
+ */
+import { Worker, NativeConnection } from "@temporalio/worker";
+import * as activities from "@/core/services/mesh/IngestionActivities";
+import { getMeshEnv } from "@/lib/mesh/env";
+import path from "node:path";
+
+const TASK_QUEUE = "sarah-mesh";
+
+async function main() {
+  const env = getMeshEnv();
+
+  console.log(`[temporal-worker] Connecting to ${env.TEMPORAL_ADDRESS}`);
+
+  const connection = await NativeConnection.connect({
+    address: env.TEMPORAL_ADDRESS,
+  });
+
+  const worker = await Worker.create({
+    connection,
+    namespace: env.TEMPORAL_NAMESPACE,
+    taskQueue: TASK_QUEUE,
+    workflowsPath: path.resolve(__dirname, "../core/services/mesh/IngestionWorkflow"),
+    activities,
+    maxConcurrentActivityTaskExecutions: 4,
+    maxConcurrentWorkflowTaskExecutions: 2,
+  });
+
+  console.log(`[temporal-worker] Ready. Task queue: ${TASK_QUEUE}`);
+
+  process.on("SIGTERM", () => {
+    console.log("[temporal-worker] SIGTERM — draining");
+    worker.shutdown();
+  });
+  process.on("SIGINT", () => {
+    console.log("[temporal-worker] SIGINT — draining");
+    worker.shutdown();
+  });
+
+  await worker.run();
+}
+
+main().catch((err) => {
+  console.error("[temporal-worker] Fatal:", err);
+  process.exit(1);
+});
+```
+
+---
+
+## scripts/mesh-trigger-workflow.ts
+```typescript
+#!/usr/bin/env tsx
+/**
+ * Trigger a DiscoveryIngestionWorkflow via the Temporal client.
+ * Run: npm run mesh:trigger
+ *
+ * This is the "ignition" command. It starts a durable workflow that:
+ *   1. Fetches YouTube metadata for the sovereign channel
+ *   2. Generates pgvector embeddings via Ollama Metal
+ *   3. Extracts Creative DNA via Gemma 4 31B (Temp 0.85)
+ *
+ * If the Mac dies mid-run, restart this worker — Temporal resumes exactly
+ * where it left off without re-fetching or re-embedding completed steps.
+ */
+import { Client, Connection } from "@temporalio/client";
+import { discoveryIngestionWorkflow } from "@/core/services/mesh/IngestionWorkflow";
+import { getMeshEnv } from "@/lib/mesh/env";
+
+const TASK_QUEUE = "sarah-mesh";
+const CHANNEL_ID = "UCipXVNRvJIBoZt7O_aPIgzg";
+
+async function main() {
+  const env = getMeshEnv();
+
+  const connection = await Connection.connect({ address: env.TEMPORAL_ADDRESS });
+  const client = new Client({ connection, namespace: env.TEMPORAL_NAMESPACE });
+
+  const workflowId = `discovery-mine-${Date.now()}`;
+  console.log(`[trigger] Starting workflow: ${workflowId}`);
+
+  const handle = await client.workflow.start(discoveryIngestionWorkflow, {
+    taskQueue: TASK_QUEUE,
+    workflowId,
+    args: [
+      {
+        channelId: CHANNEL_ID,
+        minViewCount: 500,
+        extractDna: true,
+        ollamaModel: "gemma3:27b",
+      },
+    ],
+  });
+
+  console.log(`[trigger] Workflow running. Waiting for result...`);
+  console.log(`[trigger] Temporal UI: http://localhost:8088/namespaces/default/workflows/${workflowId}`);
+
+  const result = await handle.result();
+  console.log(`\n[trigger] ✓ Discovery Mine complete:`);
+  console.log(`  Ingested:  ${result.ingestedCount} videos`);
+  console.log(`  Embedded:  ${result.embeddedCount} vectors`);
+
+  if (result.dnaPrompt) {
+    console.log(`\n─── Creative DNA Baseline (Gemma 4 Extract) ────────────────────\n`);
+    console.log(result.dnaPrompt);
+    console.log(`\n────────────────────────────────────────────────────────────────\n`);
+  }
+
+  await connection.close();
+}
+
+main().catch((err) => {
+  console.error("[trigger] Fatal:", err);
+  process.exit(1);
+});
+```
+
+---
+
 ## app/api/mcp/route.ts
 ```typescript
 /**
  * MCP Server Hub — JSON-RPC 2.0 over HTTP POST /api/mcp
  *
  * Implements the Model Context Protocol (MCP) spec without requiring the
- * @modelcontextprotocol/sdk package.  Any MCP-compatible client (Gemma,
- * Claude, cursor agents) can discover and call these tools.
+ * @modelcontextprotocol/sdk package. Any MCP-compatible LLM client
+ * (Gemma, Claude, GPT-4o) can discover and invoke these tools.
  *
- * Tools exposed:
- *   - mesh/list_content    → recent MeshContentItem rows
- *   - mesh/get_content     → single item by id
- *   - mesh/list_events     → recent pending outbox events
- *   - mesh/service_health  → all MeshServiceIdentity heartbeats
- *   - mesh/ingest_url      → ad-hoc content ingestion trigger
+ * Tools:
+ *   Core data tools:
+ *     mesh/list_content      → recent MeshContentItem rows
+ *     mesh/get_content       → single item by id
+ *     mesh/list_events       → recent outbox events
+ *     mesh/service_health    → all MeshServiceIdentity heartbeats
+ *     mesh/list_evaluations  → AI verdicts for a content item
  *
- * Sovereignty note: this endpoint is server-side only and never touches the
- * client bundle (next.js Server Action boundary).
+ *   Intelligence tools (new):
+ *     mesh/search_gold       → pgvector semantic similarity search
+ *     mesh/get_dna           → retrieve the current Creative DNA baseline
+ *     mesh/trigger_ingest    → trigger a sensor sweep for new videos
  */
 import "server-only";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { searchGold } from "@/lib/mesh/vectorSearch";
+import { getDna } from "@/lib/mesh/dnaStore";
+import { UniversalContentIngestService } from "@/core/services/UniversalContentIngestService";
+import { youtubeApiListSchema } from "@/lib/mesh/youtubeSchema";
 
 // ── JSON-RPC 2.0 types ────────────────────────────────────────────────────────
 interface JsonRpcRequest {
@@ -1233,41 +1705,30 @@ interface JsonRpcRequest {
   method: string;
   params?: Record<string, unknown>;
 }
-
-interface JsonRpcSuccess {
-  jsonrpc: "2.0";
-  id: string | number;
-  result: unknown;
-}
-
-interface JsonRpcError {
-  jsonrpc: "2.0";
-  id: string | number | null;
-  error: { code: number; message: string; data?: unknown };
-}
+interface JsonRpcSuccess { jsonrpc: "2.0"; id: string | number; result: unknown; }
+interface JsonRpcError { jsonrpc: "2.0"; id: string | number | null; error: { code: number; message: string; data?: unknown }; }
 
 function ok(id: string | number, result: unknown): JsonRpcSuccess {
   return { jsonrpc: "2.0", id, result };
 }
-
-function err(id: string | number | null, code: number, message: string, data?: unknown): JsonRpcError {
-  return { jsonrpc: "2.0", id, error: { code, message, data } };
+function err(id: string | number | null, code: number, message: string): JsonRpcError {
+  return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-// ── MCP manifest ─────────────────────────────────────────────────────────────
+// ── MCP manifest ──────────────────────────────────────────────────────────────
 const MCP_MANIFEST = {
   name: "sovereign-mesh-hub",
-  version: "1.0.0",
-  description: "Sovereign Intelligence Mesh — tools for content, events, and service health",
+  version: "2.0.0",
+  description: "SARAH-MESH-V1 Intelligence Hub — Memory (pgvector) + Voice (Gemma DNA) + Sensors (YouTube)",
   tools: [
     {
       name: "mesh/list_content",
-      description: "List recent ingested content items, ordered by discoveredAt descending.",
+      description: "List recent ingested content items, ordered by discoveredAt desc.",
       inputSchema: {
         type: "object",
         properties: {
           limit: { type: "number", description: "Max rows (1-100, default 20)" },
-          platform: { type: "string", description: "Filter by sourcePlatform (e.g. youtube)" },
+          platform: { type: "string", description: "Filter by sourcePlatform (e.g. YOUTUBE)" },
         },
       },
     },
@@ -1286,8 +1747,8 @@ const MCP_MANIFEST = {
       inputSchema: {
         type: "object",
         properties: {
-          status: { type: "string", enum: ["PENDING", "PUBLISHED", "FAILED"], description: "Filter by status" },
-          limit: { type: "number", description: "Max rows (default 20)" },
+          status: { type: "string", enum: ["PENDING", "PUBLISHED", "FAILED"] },
+          limit: { type: "number" },
         },
       },
     },
@@ -1305,10 +1766,39 @@ const MCP_MANIFEST = {
         properties: { contentItemId: { type: "string" } },
       },
     },
+    {
+      name: "mesh/search_gold",
+      description: "Semantic similarity search across the pgvector store. Returns the most relevant content items for a given natural-language query.",
+      inputSchema: {
+        type: "object",
+        required: ["query"],
+        properties: {
+          query: { type: "string", description: "Natural language query (e.g. 'psychology of decision making')" },
+          limit: { type: "number", description: "Number of results (1-20, default 5)" },
+        },
+      },
+    },
+    {
+      name: "mesh/get_dna",
+      description: "Retrieve the current Creative DNA baseline — the Gemma 4 extracted system-prompt that captures the authentic voice and creative patterns from proven content.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "mesh/trigger_ingest",
+      description: "Trigger a sensor sweep for new videos from the sovereign YouTube channel. Runs ingestion synchronously and returns counts.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          channelId: { type: "string", description: "Override channel ID (defaults to UCipXVNRvJIBoZt7O_aPIgzg)" },
+          minViewCount: { type: "number", description: "Minimum view count filter (default 500)" },
+        },
+      },
+    },
   ],
 };
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
+
 async function handleListContent(params: Record<string, unknown>) {
   const limit = Math.min(Number(params.limit ?? 20), 100);
   const where = params.platform ? { sourcePlatform: String(params.platform) } : undefined;
@@ -1359,25 +1849,94 @@ async function handleListEvaluations(params: Record<string, unknown>) {
   });
 }
 
+// ── Intelligence tools ────────────────────────────────────────────────────────
+
+async function handleSearchGold(params: Record<string, unknown>) {
+  if (!params.query) throw new Error("query is required");
+  const limit = Math.min(Number(params.limit ?? 5), 20);
+  return searchGold(String(params.query), limit);
+}
+
+async function handleGetDna() {
+  const dna = await getDna();
+  if (!dna) {
+    return {
+      status: "not_yet_extracted",
+      message: "No Creative DNA has been extracted yet. Run mesh:discover or mesh/trigger_ingest first.",
+    };
+  }
+  return dna;
+}
+
+async function handleTriggerIngest(params: Record<string, unknown>) {
+  const channelId = String(params.channelId ?? "UCipXVNRvJIBoZt7O_aPIgzg");
+  const minViewCount = Number(params.minViewCount ?? 500);
+  const apiKey = process.env.YOUTUBE_API_KEY;
+  if (!apiKey) throw new Error("YOUTUBE_API_KEY is not set on the server");
+
+  const searchUrl = new URL("https://www.googleapis.com/youtube/v3/search");
+  searchUrl.searchParams.set("part", "snippet");
+  searchUrl.searchParams.set("channelId", channelId);
+  searchUrl.searchParams.set("maxResults", "25");
+  searchUrl.searchParams.set("order", "viewCount");
+  searchUrl.searchParams.set("type", "video");
+  searchUrl.searchParams.set("key", apiKey);
+
+  const searchRes = await fetch(searchUrl.toString());
+  if (!searchRes.ok) throw new Error(`YouTube search ${searchRes.status}`);
+  const searchJson = (await searchRes.json()) as { items?: Array<{ id?: { videoId?: string } }> };
+  const videoIds = (searchJson.items ?? []).map((i) => i.id?.videoId).filter(Boolean) as string[];
+  if (videoIds.length === 0) return { ingestedCount: 0, message: "No videos found." };
+
+  const videosUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
+  videosUrl.searchParams.set("part", "snippet,statistics,contentDetails");
+  videosUrl.searchParams.set("id", videoIds.join(","));
+  videosUrl.searchParams.set("key", apiKey);
+  const videosRes = await fetch(videosUrl.toString());
+  if (!videosRes.ok) throw new Error(`YouTube videos ${videosRes.status}`);
+
+  const list = youtubeApiListSchema.parse(await videosRes.json());
+  const service = new UniversalContentIngestService();
+  let ingestedCount = 0;
+
+  for (const item of list.items) {
+    const viewCount = parseInt(item.statistics?.viewCount ?? "0", 10);
+    if (viewCount < minViewCount) continue;
+    await service.ingest({
+      schemaVersion: "universal-content.v1",
+      sourcePlatform: "YOUTUBE",
+      externalId: item.id,
+      sourceChannelId: channelId,
+      canonicalUrl: `https://www.youtube.com/watch?v=${item.id}`,
+      title: item.snippet.title,
+      description: item.snippet.description,
+      contentText: [item.snippet.title, item.snippet.description].filter(Boolean).join("\n\n"),
+      viewCount,
+      publishedAt: item.snippet.publishedAt,
+      discoveredAt: new Date().toISOString(),
+      rawPayload: item as unknown as Record<string, unknown>,
+    });
+    ingestedCount++;
+  }
+
+  return { ingestedCount, channelId, minViewCount, message: `Ingested ${ingestedCount} videos.` };
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 async function dispatch(req: JsonRpcRequest): Promise<JsonRpcSuccess | JsonRpcError> {
   const { id, method, params = {} } = req;
   try {
     switch (method) {
-      case "mcp/manifest":
-        return ok(id, MCP_MANIFEST);
-      case "mesh/list_content":
-        return ok(id, await handleListContent(params));
-      case "mesh/get_content":
-        return ok(id, await handleGetContent(params));
-      case "mesh/list_events":
-        return ok(id, await handleListEvents(params));
-      case "mesh/service_health":
-        return ok(id, await handleServiceHealth());
-      case "mesh/list_evaluations":
-        return ok(id, await handleListEvaluations(params));
-      default:
-        return err(id, -32601, `Method not found: ${method}`);
+      case "mcp/manifest":         return ok(id, MCP_MANIFEST);
+      case "mesh/list_content":    return ok(id, await handleListContent(params));
+      case "mesh/get_content":     return ok(id, await handleGetContent(params));
+      case "mesh/list_events":     return ok(id, await handleListEvents(params));
+      case "mesh/service_health":  return ok(id, await handleServiceHealth());
+      case "mesh/list_evaluations":return ok(id, await handleListEvaluations(params));
+      case "mesh/search_gold":     return ok(id, await handleSearchGold(params));
+      case "mesh/get_dna":         return ok(id, await handleGetDna());
+      case "mesh/trigger_ingest":  return ok(id, await handleTriggerIngest(params));
+      default: return err(id, -32601, `Method not found: ${method}`);
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Internal error";
@@ -1385,14 +1944,11 @@ async function dispatch(req: JsonRpcRequest): Promise<JsonRpcSuccess | JsonRpcEr
   }
 }
 
-// ── Next.js route ─────────────────────────────────────────────────────────────
+// ── Next.js route handlers ────────────────────────────────────────────────────
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json(err(null, -32700, "Parse error"), { status: 400 });
-  }
+  try { body = await request.json(); }
+  catch { return NextResponse.json(err(null, -32700, "Parse error"), { status: 400 }); }
 
   const rpc = body as JsonRpcRequest;
   if (rpc.jsonrpc !== "2.0" || !rpc.method) {
@@ -1570,30 +2126,57 @@ describe("6. Kafka Client Singleton", () => {
 
 // ── 7. MCP Server Hub ────────────────────────────────────────────────────────
 describe("7. MCP Server Hub", () => {
-  it("implements mcp/manifest and mesh/* tool methods", () => {
+  it("implements mcp/manifest and core mesh/* tool methods", () => {
     const f = read("app/api/mcp/route.ts");
     expect(f).toContain("mcp/manifest");
     expect(f).toContain("mesh/list_content");
     expect(f).toContain("mesh/list_events");
     expect(f).toContain("jsonrpc");
   });
+
+  it("exposes intelligence tools: search_gold, get_dna, trigger_ingest", () => {
+    const f = read("app/api/mcp/route.ts");
+    expect(f).toContain("mesh/search_gold");
+    expect(f).toContain("mesh/get_dna");
+    expect(f).toContain("mesh/trigger_ingest");
+  });
 });
 
-// ── 8. Workflow Contract ──────────────────────────────────────────────────────
+// ── 8. Temporal Workflow Contract ─────────────────────────────────────────────
 describe("8. Temporal Workflow Contract", () => {
-  it("defines discoveryIngestionWorkflow with correct input shape", () => {
+  it("uses proxyActivities — proper Temporal V8 isolate pattern", () => {
     const f = read("core/services/mesh/IngestionWorkflow.ts");
+    expect(f).toContain("proxyActivities");
+    expect(f).toContain("@temporalio/workflow");
     expect(f).toContain("discoveryIngestionWorkflow");
-    expect(f).toContain("DiscoveryIngestionWorkflowInput");
-    expect(f).toContain("minViewCount");
-    expect(f).toContain("extractDna");
+  });
+
+  it("activities are separated into IngestionActivities.ts (I/O boundary)", () => {
+    const f = read("core/services/mesh/IngestionActivities.ts");
+    expect(f).toContain("fetchYouTubeMetadata");
+    expect(f).toContain("generateEmbeddings");
+    expect(f).toContain("extractCreativeDna");
   });
 
   it("DNA extraction calls Ollama with high-entropy settings", () => {
-    const f = read("core/services/mesh/IngestionWorkflow.ts");
-    expect(f).toContain("temperature");
-    expect(f).toContain("top_p");
+    const f = read("core/services/mesh/IngestionActivities.ts");
+    expect(f).toContain("temperature: 0.85");
+    expect(f).toContain("top_p: 0.95");
     expect(f).toContain("/api/generate");
+  });
+
+  it("Gemma judge adapter replaces bootstrap rule engine", () => {
+    const f = read("adapters/intelligence/OllamaGemmaJudgeAdapter.ts");
+    expect(f).toContain("OllamaGemmaJudgeAdapter");
+    expect(f).toContain("/api/generate");
+    expect(f).toContain("gemma3:27b");
+  });
+
+  it("DNA store persists and retrieves creative DNA baseline", () => {
+    const f = read("lib/mesh/dnaStore.ts");
+    expect(f).toContain("saveDna");
+    expect(f).toContain("getDna");
+    expect(f).toContain("sarah.creative.dna");
   });
 });
 
@@ -1633,7 +2216,7 @@ describe("10. Docker Compose Mesh Profile", () => {
 ---
 
 ## prisma/schema.prisma
-```prisma
+```typescript
 generator client {
   provider = "prisma-client-js"
 }
@@ -1961,7 +2544,7 @@ model MeshServiceIdentity {
 ---
 
 ## prisma/migrations/20260402070000_mesh_event_foundation/migration.sql
-```sql
+```typescript
 -- Mesh event foundation: universal content store, immutable outbox, evaluation records, service identities.
 -- This keeps Postgres as the operational event vault today and a CDC/Kafka handoff point later.
 
@@ -2084,7 +2667,7 @@ ALTER TABLE "mesh_content_evaluation" ADD CONSTRAINT "mesh_content_evaluation_co
 ---
 
 ## docker-compose.yml
-```yaml
+```typescript
 services:
   # ── Postgres 17 + pgvector ────────────────────────────────────────────────
   mesh_db:
@@ -2193,33 +2776,100 @@ volumes:
 ---
 
 ## package.json
-```json
+```typescript
 {
-  "name": "sarah-agentic-mesh",
-  "version": "1.0.0",
+  "name": "sovereign-sun-platform",
+  "version": "1.3.0",
   "private": true,
-  "description": "SARAH-MESH-V1 — Sovereign Intelligence Mesh. Event-sourced content engine with Kafka KRaft, Temporal, pgvector, MCP Hub.",
   "scripts": {
-    "mesh:discover":       "tsx scripts/mesh-discovery-mine.ts",
-    "mesh:relay":          "tsx scripts/mesh-outbox-relay.ts",
-    "mesh:embed":          "tsx scripts/mesh-embedding-worker.ts",
+    "dev": "next dev",
+    "build": "node scripts/guard-persistence-adapter.mjs && node scripts/guard-consent-gate.mjs && prisma generate && next build",
+    "start": "next start -H 0.0.0.0 -p 3000",
+    "prepare": "husky",
+    "verify:smoke": "./scripts/verify.sh",
+    "verify:commit": "npm run build",
+    "verify:sovereign": "npm run build && cd siu && node hydration_audit.js",
+    "verify:system": "bash siu/systemic_guard.sh",
+    "verify:full": "npm run verify:system && node siu/accessibility_audit.js && node siu/pen_test_audit.js",
+    "audit:sovereign": "bash siu/grand_audit.sh",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "squeeze:fire": "node scripts/fire-squeeze-trial.mjs",
+    "docker:smoke": "sh scripts/docker-smoke-check.sh",
+    "compose": "./scripts/compose.sh",
+    "siu:ghost": "sh intelligence-unit/ghost-killer.sh",
+    "siu:watchdog": "sh siu/network_watchdog.sh",
+    "siu:probe": "python3 siu/health_probe.py",
+    "siu:ports": "python3 siu/watchdog.py",
+    "siu:state:once": "python3 siu/sovereign_watchdog.py --once",
+    "siu:state:daemon": "python3 siu/sovereign_watchdog.py --daemon",
+    "siu:ui": "cd siu && npm install && npx playwright install chromium --force && node ui_fitness_test.js",
+    "siu:fitness": "cd siu && npm install && npx playwright install chromium --force && node fitness_check.js",
+    "siu:sovereignty": "python3 siu/sovereignty_guard.py",
+    "siu:hydration": "cd siu && npm install && npx playwright install chromium --force && node hydration_audit.js",
+    "siu:handshake": "bash siu/handshake_prober.sh",
+    "siu:reboot": "./scripts/sovereign_reboot.sh",
+    "sovereign:sync": "./scripts/sovereign_sync.sh",
+    "siu:loop": "node intelligence-unit/loop-manager.mjs",
+    "setup:git-workflow": "./scripts/setup-git-workflow.sh",
+    "sync-audit": "tsx scripts/sync-audit.ts",
+    "sync:check": "tsx scripts/agentic-sync.ts",
     "mesh:youtube:ingest": "tsx scripts/mesh-youtube-ingest.ts",
-    "mesh:up":             "docker compose --profile mesh up -d",
-    "mesh:down":           "docker compose --profile mesh down",
-    "test:architecture":   "vitest run core/architecture/**/*.test.ts",
-    "test":                "vitest run",
-    "typecheck":           "tsc --noEmit"
+    "mesh:relay": "tsx scripts/mesh-outbox-relay.ts",
+    "mesh:embed": "tsx scripts/mesh-embedding-worker.ts",
+    "mesh:discover": "tsx scripts/mesh-discovery-mine.ts",
+    "mesh:worker": "tsx scripts/mesh-temporal-worker.ts",
+    "mesh:trigger": "tsx scripts/mesh-trigger-workflow.ts",
+    "mesh:up": "docker compose -f docker-compose.monster.yml --profile mesh up -d",
+    "mesh:down": "docker compose -f docker-compose.monster.yml --profile mesh down",
+    "cf:edge": "node scripts/cloudflare-edge-sync.mjs",
+    "cf:edge:dns": "node scripts/cloudflare-edge-sync.mjs --dns-only",
+    "cf:edge:tunnel": "node scripts/cloudflare-edge-sync.mjs --tunnel-only",
+    "cf:edge:dry": "node scripts/cloudflare-edge-sync.mjs --dry-run",
+    "cf:edge:openclaw": "bash scripts/openclaw-edge-sync.sh",
+    "compose:cf-sync": "docker compose -f docker-compose.monster.yml --profile cf-sync run --rm monster_cf_edge_sync",
+    "operator:check": "bash scripts/operator-check.sh",
+    "secrets:hygiene": "bash scripts/secrets-hygiene-check.sh",
+    "fitness:prod": "bash scripts/production-fitness-check.sh",
+    "siu:dashboard": "bash siu/dashboard.sh",
+    "test:architecture": "vitest run core/architecture/**/*.test.ts"
   },
   "dependencies": {
     "@prisma/client": "6.1.0",
+    "@sentry/node": "^10.46.0",
+    "@temporalio/activity": "^1.16.0",
+    "@temporalio/client": "^1.16.0",
+    "@temporalio/worker": "^1.16.0",
+    "@temporalio/workflow": "^1.16.0",
+    "@types/pg": "^8.20.0",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "framer-motion": "11.11.17",
+    "ioredis": "^5.7.0",
     "kafkajs": "^2.2.4",
-    "pg": "^8.13.3",
+    "lucide-react": "0.468.0",
+    "next": "16.2.0",
+    "next-themes": "0.4.4",
+    "pg": "^8.20.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "resend": "^6.10.0",
     "server-only": "^0.0.1",
+    "sonner": "1.7.1",
+    "svix": "^1.90.0",
+    "tailwind-merge": "2.5.5",
+    "tailwindcss": "3.4.16",
+    "tailwindcss-animate": "1.0.7",
+    "winston": "^3.19.0",
     "zod": "3.24.2"
   },
   "devDependencies": {
     "@types/node": "22.10.2",
-    "@types/pg": "^8.11.11",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "10.4.20",
+    "husky": "^9.1.7",
+    "postcss": "8.4.49",
     "prisma": "6.1.0",
     "tsx": "4.19.2",
     "typescript": "5.7.2",
@@ -2231,7 +2881,7 @@ volumes:
 ---
 
 ## .env.example
-```bash
+```typescript
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASE_URL=postgresql://postgres:yourpassword@localhost:5432/lead_engine?schema=public
 DATABASE_USER=postgres
